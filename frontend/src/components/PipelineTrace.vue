@@ -36,7 +36,10 @@ function statusLabel(status: PipelineStep['status']): string {
         </div>
         <div class="trace-copy">
           <div class="trace-title-row">
-            <strong>{{ step.label }}</strong>
+            <strong>
+              {{ step.label }}
+              <span v-if="step.key === 'generation'" class="trace-ai-label">LLM</span>
+            </strong>
             <span class="status-chip">{{ statusLabel(step.status) }}</span>
           </div>
           <p>{{ step.detail }}</p>

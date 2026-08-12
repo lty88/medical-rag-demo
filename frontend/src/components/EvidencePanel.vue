@@ -1,7 +1,10 @@
 <script setup lang="tsx">
 import type { Citation } from '../types'
 
-defineProps<{ citations: Citation[] }>()
+defineProps<{
+  citations: Citation[]
+  generationMode: 'configured-llm' | 'evidence-template' | 'not-run'
+}>()
 </script>
 
 <template>
@@ -15,12 +18,22 @@ defineProps<{ citations: Citation[] }>()
     </div>
 
     <div v-if="citations.length" class="evidence-list">
-      <article v-for="citation in citations" :key="citation.marker" class="evidence-card">
+      <article
+        v-for="citation in citations"
+        :id="`evidence-${citation.marker}`"
+        :key="citation.marker"
+        class="evidence-card"
+      >
         <header>
           <span class="citation-marker">{{ citation.marker }}</span>
-          <span :class="['trust-badge', `trust-${citation.trust_level}`]">
-            {{ citation.trust_level }}
-          </span>
+          <div class="evidence-badges">
+            <span v-if="generationMode === 'configured-llm'" class="llm-evidence-badge">
+              已送入 LLM
+            </span>
+            <span :class="['trust-badge', `trust-${citation.trust_level}`]">
+              {{ citation.trust_level }}
+            </span>
+          </div>
         </header>
         <h3>{{ citation.title }}</h3>
         <p>{{ citation.excerpt }}</p>

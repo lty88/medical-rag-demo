@@ -6,8 +6,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BASE_DIR / ".env", override=False)
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,21 @@ class Settings:
     llm_base_url: str | None = os.getenv("LLM_BASE_URL") or None
     llm_api_key: str | None = os.getenv("LLM_API_KEY") or None
     llm_model: str | None = os.getenv("LLM_MODEL") or None
+    llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
+    llm_evidence_max_characters: int = int(
+        os.getenv("LLM_EVIDENCE_MAX_CHARACTERS", "2500")
+    )
+    llm_max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1200"))
+    llm_enable_thinking: bool | None = (
+        os.getenv("LLM_ENABLE_THINKING", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        if os.getenv("LLM_ENABLE_THINKING", "").strip()
+        else None
+    )
+    retrieval_log_top_k: int = int(os.getenv("RETRIEVAL_LOG_TOP_K", "10"))
+    retrieval_log_content_characters: int = int(
+        os.getenv("RETRIEVAL_LOG_CONTENT_CHARACTERS", "300")
+    )
     cors_origins: tuple[str, ...] = (
         "http://localhost:5173",
         "http://127.0.0.1:5173",

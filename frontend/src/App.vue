@@ -35,6 +35,7 @@ async function loadStats() {
 async function handleSubmit(form: ConsultationFormState) {
   loading.value = true
   error.value = ''
+  result.value = null
   try {
     result.value = await submitConsultation(form)
   } catch (requestError) {
@@ -103,6 +104,12 @@ onMounted(loadStats)
               <dd>{{ stats?.reranker_mode ?? 'offline' }}</dd>
             </div>
             <div>
+              <dt>Generation</dt>
+              <dd :class="stats?.llm_ready ? 'safe-value' : 'warning-value'">
+                {{ stats?.llm_ready ? `${stats.llm_model} / CONFIGURED` : 'EVIDENCE TEMPLATE' }}
+              </dd>
+            </div>
+            <div>
               <dt>Corpus</dt>
               <dd>{{ stats?.vector_document_count.toLocaleString() ?? 0 }} vectors</dd>
             </div>
@@ -127,11 +134,22 @@ onMounted(loadStats)
           <span>{{ error }}</span>
         </div>
 
-        <template v-if="result">
+        <section v-if="loading" class="panel generation-loading" aria-live="polite">
+          <div class="generation-pulse" aria-hidden="true"><span /></div>
+          <p class="eyebrow">RETRIEVE · RERANK · GENERATE</p>
+          <h2>正在组织有出处的回答</h2>
+          <p>系统正在完成双路召回、医疗精排和证据约束生成，请稍候。</p>
+          <div class="loading-track"><span /></div>
+        </section>
+
+        <template v-else-if="result">
           <ResultPanel :result="result" />
           <div class="detail-grid">
             <PipelineTrace :steps="result.pipeline" />
-            <EvidencePanel :citations="result.citations" />
+            <EvidencePanel
+              :citations="result.citations"
+              :generation-mode="result.generation_mode"
+            />
           </div>
         </template>
 

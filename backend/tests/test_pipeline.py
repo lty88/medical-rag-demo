@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from app.config import BASE_DIR, Settings
 from app.models import ConsultationRequest, SourceDocument
 from app.pipeline import MedicalRagPipeline
 from app.services.embedding_text import build_embedding_text
+from app.services.generator import EvidenceBoundGenerator
 from app.services.persistent_index import build_fts_query
 from app.services.privacy import redact_privacy
 from app.services.retrieval import reciprocal_rank_fusion
@@ -127,6 +131,173 @@ class EmbeddingTextTests(unittest.TestCase):
         self.assertNotIn("后续内容", text)
 
 
+class GeneratorTests(unittest.TestCase):
+    """验证最终检索证据会进入兼容 LLM 接口并保留失败原因。"""
+
+    def setUp(self) -> None:
+        """创建一条带来源和权限信息的最终候选证据。"""
+
+        from app.models import RankedDocument
+
+        self.candidates = [
+            RankedDocument(
+                document=SourceDocument(
+                    id="evidence-1",
+                    title="咳嗽伴血痰的相关资料",
+                    question="咳嗽时痰中带血怎么办",
+                    content="痰中带血需要结合出血量和伴随表现进一步评估。",
+                    source="test-guideline",
+                    source_type="guideline",
+                    trust_level="primary",
+                    allow_treatment_generation=False,
+                )
+            )
+        ]
+
+    def test_sends_final_evidence_to_configured_llm(self) -> None:
+        """配置完整时应发送用户问题和最终证据并解析结构化回答。"""
+
+        response_body = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"title":"辅助信息","summary":"需要进一步评估[S1]",'
+                            '"sections":[{"title":"依据","content":"关注出血量[S1]"}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+        class FakeResponse:
+            """模拟 urllib 可作为上下文管理器读取的 HTTP 响应。"""
+
+            def __enter__(self) -> "FakeResponse":
+                """进入模拟响应上下文。
+
+                Returns:
+                    当前模拟响应对象。
+                """
+
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                """退出模拟响应上下文，无需释放外部资源。"""
+
+            def read(self) -> bytes:
+                """返回模拟 Chat Completions JSON 字节。
+
+                Returns:
+                    序列化后的接口响应。
+                """
+
+                import json
+
+                return json.dumps(response_body, ensure_ascii=False).encode("utf-8")
+
+        generator = EvidenceBoundGenerator(
+            "https://llm.example/v1",
+            "test-key",
+            "test-model",
+            enable_thinking=False,
+        )
+        captured_request = None
+
+        def fake_urlopen(request: object, timeout: int) -> FakeResponse:
+            """捕获生成器请求并返回固定结构化响应。
+
+            Args:
+                request: 生成器构建的 urllib 请求对象。
+                timeout: 生成器配置的超时秒数。
+
+            Returns:
+                包含结构化模型输出的模拟响应。
+            """
+
+            nonlocal captured_request
+            captured_request = request
+            self.assertEqual(timeout, 180)
+            return FakeResponse()
+
+        with self.assertLogs(
+            "uvicorn.error.medical_rag.llm", level="INFO"
+        ) as captured_logs:
+            with patch("app.services.generator.urlopen", side_effect=fake_urlopen):
+                answer = generator.generate(
+                    "咳嗽时有血痰",
+                    self.candidates,
+                    ["大约有多少血？"],
+                    False,
+                    request_id="request-for-log-test",
+                )
+
+        self.assertEqual(answer.mode, "configured-llm")
+        self.assertIn("1 条最终检索证据", answer.detail)
+        self.assertIsNotNone(captured_request)
+        request_body = BytesIO(captured_request.data).read().decode("utf-8")
+        self.assertIn("咳嗽时有血痰", request_body)
+        self.assertIn("test-guideline", request_body)
+        self.assertIn("痰中带血需要结合出血量", request_body)
+        self.assertIn('"max_tokens": 1200', request_body)
+        self.assertIn('"enable_thinking": false', request_body)
+        log_text = "\n".join(captured_logs.output)
+        self.assertIn("[LLM请求]", log_text)
+        self.assertIn("[LLM响应]", log_text)
+        self.assertIn("request-for-log-test", log_text)
+        self.assertNotIn("test-key", log_text)
+
+    def test_reports_missing_model_in_fallback_detail(self) -> None:
+        """模型名称缺失时应明确显示配置问题而不是静默回退。"""
+
+        generator = EvidenceBoundGenerator(
+            "https://llm.example/v1",
+            "test-key",
+            None,
+        )
+        answer = generator.generate("咳嗽时有血痰", self.candidates, [], False)
+
+        self.assertEqual(answer.mode, "evidence-template")
+        self.assertIn("LLM_MODEL", answer.detail)
+
+    def test_reports_safe_provider_error_fields_for_http_403(self) -> None:
+        """接口返回 403 时应保留错误码和请求标识且不得打印密钥。"""
+
+        generator = EvidenceBoundGenerator(
+            "https://dashscope.example/v1",
+            "secret-test-key",
+            "qwen-plus",
+        )
+        error = HTTPError(
+            "https://dashscope.example/v1/chat/completions",
+            403,
+            "Forbidden",
+            {},
+            BytesIO(
+                b'{"code":"AccessDenied","message":"Model access denied",'
+                b'"request_id":"provider-request-id"}'
+            ),
+        )
+
+        with patch("app.services.generator.urlopen", side_effect=error):
+            with self.assertLogs(
+                "uvicorn.error.medical_rag.llm", level="WARNING"
+            ) as captured_logs:
+                answer = generator.generate(
+                    "咳嗽时有血痰",
+                    self.candidates,
+                    [],
+                    False,
+                    request_id="local-request-id",
+                )
+
+        self.assertEqual(answer.mode, "evidence-template")
+        self.assertIn("code=AccessDenied", answer.detail)
+        self.assertIn("message=Model access denied", answer.detail)
+        self.assertIn("request_id=provider-request-id", answer.detail)
+        self.assertNotIn("secret-test-key", "\n".join(captured_logs.output))
+
+
 class PipelineTests(unittest.TestCase):
     """验证普通、急症和治疗请求三条核心路径。"""
 
@@ -144,6 +315,9 @@ class PipelineTests(unittest.TestCase):
             final_top_k=3,
             embedding_model=None,
             reranker_model=None,
+            llm_base_url=None,
+            llm_api_key=None,
+            llm_model=None,
         )
         self.pipeline = MedicalRagPipeline(settings)
 
@@ -155,18 +329,25 @@ class PipelineTests(unittest.TestCase):
     def test_routine_question_reaches_validation(self) -> None:
         """普通头痛信息请求应完成检索并通过引用校验。"""
 
-        response = self.pipeline.consult(
-            ConsultationRequest(
-                symptoms="头痛两天，休息后缓解，没有肢体无力，还需要观察什么？",
-                age=28,
-                sex="female",
-                duration="2天",
+        with self.assertLogs(
+            "uvicorn.error.medical_rag.pipeline", level="INFO"
+        ) as captured_logs:
+            response = self.pipeline.consult(
+                ConsultationRequest(
+                    symptoms="头痛两天，休息后缓解，没有肢体无力，还需要观察什么？",
+                    age=28,
+                    sex="female",
+                    duration="2天",
+                )
             )
-        )
         self.assertFalse(response.blocked)
         self.assertTrue(response.citations)
         self.assertEqual(response.pipeline[-1].key, "validation")
         self.assertEqual(response.pipeline[-1].status, "passed")
+        log_text = "\n".join(captured_logs.output)
+        self.assertIn("[用户输入]", log_text)
+        self.assertIn("[检索结果][BM25]", log_text)
+        self.assertIn("[检索结果][最终证据]", log_text)
 
     def test_emergency_question_stops_before_retrieval(self) -> None:
         """急症描述应在危险信号阶段停止，不执行召回。"""

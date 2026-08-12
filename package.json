@@ -1,0 +1,9 @@
+{
+  "name": "medical-rag-demo",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "dev:server": "HF_HUB_OFFLINE=1 MODEL_DEVICE=mps PYTHONPATH=backend .venv-full/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+    "dev:web": "pnpm --dir frontend run dev"
+  }
+}

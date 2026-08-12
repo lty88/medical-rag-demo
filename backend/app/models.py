@@ -135,6 +135,8 @@ class ConsultationResponse(BaseModel):
     pipeline: list[PipelineStep]
     validation_issues: list[str]
     retrieval_mode: str
+    generation_mode: Literal["configured-llm", "evidence-template", "not-run"]
+    generation_model: str | None
     privacy_notice: str
     disclaimer: str
 
@@ -152,4 +154,6 @@ class KnowledgeStats(BaseModel):
     vector_index_ready: bool
     reranker_mode: str
     reranker_model: str | None
+    llm_ready: bool
+    llm_model: str | None
     capped: bool

@@ -16,6 +16,11 @@ export interface AnswerSection {
   content: string
 }
 
+export interface AnswerContentPart {
+  value: string
+  marker: string | null
+}
+
 export interface Citation {
   marker: string
   title: string
@@ -48,6 +53,8 @@ export interface ConsultationResponse {
   pipeline: PipelineStep[]
   validation_issues: string[]
   retrieval_mode: string
+  generation_mode: 'configured-llm' | 'evidence-template' | 'not-run'
+  generation_model: string | null
   privacy_notice: string
   disclaimer: string
 }
@@ -63,6 +70,8 @@ export interface KnowledgeStats {
   vector_index_ready: boolean
   reranker_mode: string
   reranker_model: string | null
+  llm_ready: boolean
+  llm_model: string | null
   capped: boolean
 }
 

@@ -72,6 +72,8 @@ def build_stats(
     capped: bool,
     embedding_model: str | None,
     reranker_model: str | None,
+    llm_ready: bool,
+    llm_model: str | None,
 ) -> KnowledgeStats:
     """统计知识库来源、可信等级和当前检索实现。
 
@@ -82,6 +84,8 @@ def build_stats(
         capped: 是否因内存上限截断加载。
         embedding_model: 当前配置的向量模型名称。
         reranker_model: 当前配置的精排模型名称。
+        llm_ready: 大模型地址、密钥和模型名是否配置完整。
+        llm_model: 当前配置的生成模型名称。
 
     Returns:
         可直接返回给前端的知识库统计对象。
@@ -98,5 +102,7 @@ def build_stats(
         vector_index_ready=False,
         reranker_mode=reranker_mode,
         reranker_model=reranker_model,
+        llm_ready=llm_ready,
+        llm_model=llm_model,
         capped=capped,
     )

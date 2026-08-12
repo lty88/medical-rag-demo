@@ -243,7 +243,7 @@ sequenceDiagram
         R->>R: RRF 去重并保留 Top 40
         R->>R: Cross-Encoder 精排
         R->>G: 人群过滤并保留最终 Top 4
-        G->>G: 证据模板或可选 LLM 生成
+        G->>G: 将最终证据发送给已配置 LLM，失败时回退证据模板
         G->>G: 引用、诊断、剂量和数字校验
         G-->>U: 结构化答案、引用、追问和流程轨迹
     end
@@ -554,7 +554,7 @@ HF_HUB_OFFLINE=1 PYTHONPATH=backend \
 
 ### 10.1 环境变量
 
-后端直接读取系统环境变量。可以复制示例文件，并在启动时显式传给 Uvicorn：
+后端会自动加载 `backend/.env`，同时保留系统环境变量的更高优先级。先复制示例文件：
 
 ```bash
 cp backend/.env.example backend/.env
@@ -577,32 +577,56 @@ cp backend/.env.example backend/.env
 | `EMBEDDING_MODEL_SUBFOLDER` | `model` | 模型仓库内子目录 |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-Encoder 模型 |
 | `MODEL_DEVICE` | `auto` | `auto`、`mps`、`cuda` 或 `cpu` |
-| `LLM_BASE_URL` | 空 | 可选 OpenAI 兼容接口地址 |
-| `LLM_API_KEY` | 空 | 可选接口密钥，禁止提交仓库 |
-| `LLM_MODEL` | 空 | 可选生成模型名称 |
+| `LLM_BASE_URL` | 空 | OpenAI 兼容接口根地址或完整 `/chat/completions` 地址 |
+| `LLM_API_KEY` | 空 | 接口密钥，禁止提交仓库 |
+| `LLM_MODEL` | 空 | 兼容接口实际支持的模型名称 |
+| `LLM_TIMEOUT_SECONDS` | `180` | 单次生成请求超时秒数 |
+| `LLM_EVIDENCE_MAX_CHARACTERS` | `2500` | 每条最终证据发送给 LLM 的最大字符数 |
+| `LLM_MAX_OUTPUT_TOKENS` | `1200` | 单次结构化回答最大输出 Token 数 |
+| `LLM_ENABLE_THINKING` | 空 | 支持思考开关的接口可设为 `false`，其他接口留空 |
+| `RETRIEVAL_LOG_TOP_K` | `10` | 每个检索阶段打印的最大候选数量 |
+| `RETRIEVAL_LOG_CONTENT_CHARACTERS` | `300` | 每条检索结果打印的正文预览字符数 |
 
 Embedding 查询模型必须与 `medical.faiss.json` 中的建库模型和子目录完全一致，否则服务拒绝加载向量索引。
 
 ### 10.2 启动后端
 
-不使用 `.env`：
+从项目根目录启动时，可以直接使用统一脚本：
 
 ```bash
-PYTHONPATH=backend .venv-full/bin/uvicorn \
-  app.main:app --reload --host 127.0.0.1 --port 8000
+pnpm dev:server
 ```
 
-使用 `backend/.env`：
+等价的后端命令如下；配置模块会自动读取 `backend/.env`，不需要额外传 `--env-file`：
 
 ```bash
-PYTHONPATH=backend .venv-full/bin/uvicorn \
-  app.main:app --reload --host 127.0.0.1 --port 8000 \
-  --env-file backend/.env
+HF_HUB_OFFLINE=1 MODEL_DEVICE=mps PYTHONPATH=backend \
+  .venv-full/bin/python -m uvicorn app.main:app \
+  --host 127.0.0.1 --port 8000
 ```
 
 启动时会预热 Reranker；Embedding 查询模型在第一次向量查询时延迟加载。
 
-### 10.3 启动前端
+配置完整并且最终证据非空时，系统会把脱敏后的用户问题、追问、最终 Top 4 证据的标题、来源、可信等级、治疗权限和正文发送给 LLM。前端“结构化答案生成”轨迹应显示 `configured-llm`；若显示 `evidence-template`，同一行会说明缺少的配置、HTTP 状态、网络错误或响应格式错误。
+
+### 10.3 请求、检索和 LLM 日志
+
+后端终端会按同一个 `request_id` 输出三类中文 JSON 日志：
+
+```text
+[用户输入] {"request_id":"...","symptoms":"脱敏后的用户描述",...}
+[检索结果][BM25] {"request_id":"...","total":100,"candidates":[...]}
+[检索结果][FAISS] {"request_id":"...","total":100,"candidates":[...]}
+[检索结果][RRF] {"request_id":"...","total":40,"candidates":[...]}
+[检索结果][Reranker] {"request_id":"...","total":40,"candidates":[...]}
+[检索结果][最终证据] {"request_id":"...","total":4,"candidates":[...]}
+[LLM请求] {"request_id":"...","url":"...","payload":{...}}
+[LLM响应] {"request_id":"...","model":"...","content":"...","usage":{...}}
+```
+
+用户日志只记录隐私处理后的文本。LLM 请求日志包含实际提示词和证据，但不会记录 `Authorization` 请求头或 `LLM_API_KEY`。生产环境应根据医疗数据合规要求决定是否继续保留这些调试日志。
+
+### 10.4 启动前端
 
 ```bash
 cd frontend
@@ -623,7 +647,7 @@ Vite 会把 `/api` 请求代理到 `http://127.0.0.1:8000`。
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 服务状态和版本 |
-| GET | `/api/knowledge/stats` | 文档数量、来源、FAISS和Reranker状态 |
+| GET | `/api/knowledge/stats` | 文档数量、来源、FAISS、Reranker 和 LLM 配置状态 |
 | POST | `/api/consult` | 执行完整医疗安全检索链路 |
 | GET | `/docs` | FastAPI 交互式接口文档 |
 
@@ -653,7 +677,9 @@ curl -X POST http://127.0.0.1:8000/api/consult \
 - `structured_symptoms`：结构化症状；
 - `pipeline`：每个阶段的状态、说明和耗时；
 - `validation_issues`：生成后校验失败原因；
-- `retrieval_mode`：本次实际使用的检索和精排方式。
+- `retrieval_mode`：本次实际使用的检索和精排方式；
+- `generation_mode`：`configured-llm`、`evidence-template` 或急症分支的 `not-run`；
+- `generation_model`：本次成功生成答案的模型名称，回退时为空。
 
 ## 12. 降级策略
 
@@ -664,7 +690,7 @@ curl -X POST http://127.0.0.1:8000/api/consult \
 | `knowledge.db` 不存在 | 加载少量示例数据，仅运行内存 BM25 |
 | `medical.faiss` 不存在或不匹配 | 保留全量 SQLite BM25，FAISS 标记为 fallback |
 | Reranker 模型不可用 | 使用词元重合度和医疗证据策略排序，并标记 fallback |
-| 未配置 LLM 或调用失败 | 使用证据模板生成，并标记 fallback |
+| 未配置 LLM 或调用失败 | 使用证据模板生成，标记 fallback，并在流程轨迹显示安全失败原因 |
 | 没有候选或校验失败 | 阻断回答，返回拒绝原因和就医建议 |
 
 可通过以下接口确认当前是否真正启用全量 FAISS 和 Reranker：
