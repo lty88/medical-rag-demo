@@ -13,6 +13,30 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env", override=False)
 
 
+def parse_cors_origins(value: str | None) -> tuple[str, ...]:
+    """解析逗号分隔的前端来源并提供本地开发默认值。
+
+    Args:
+        value: 环境变量中的逗号分隔来源列表。
+
+    Returns:
+        去除空白和末尾斜杠后的允许来源元组。
+    """
+
+    default_origins = (
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    )
+    if not value:
+        return default_origins
+    origins = tuple(
+        origin.strip().rstrip("/")
+        for origin in value.split(",")
+        if origin.strip()
+    )
+    return origins or default_origins
+
+
 @dataclass(frozen=True)
 class Settings:
     """集中保存后端运行参数。"""
@@ -77,10 +101,7 @@ class Settings:
     retrieval_log_content_characters: int = int(
         os.getenv("RETRIEVAL_LOG_CONTENT_CHARACTERS", "300")
     )
-    cors_origins: tuple[str, ...] = (
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    )
+    cors_origins: tuple[str, ...] = parse_cors_origins(os.getenv("CORS_ORIGINS"))
 
 
 settings = Settings()

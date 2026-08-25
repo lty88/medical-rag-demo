@@ -1,0 +1,77 @@
+name: Deploy Web to Vercel
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/vercel-deploy.yml
+      - frontend/**
+      - package.json
+      - vercel.json
+  workflow_dispatch:
+
+concurrency:
+  group: vercel-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    name: Deploy production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.21.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          test -n "$VERCEL_TOKEN" || { echo "Missing VERCEL_TOKEN"; exit 1; }
+          test -n "$VERCEL_ORG_ID" || { echo "Missing VERCEL_ORG_ID"; exit 1; }
+          test -n "$VERCEL_PROJECT_ID" || { echo "Missing VERCEL_PROJECT_ID"; exit 1; }
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Install Vercel CLI
+        run: pnpm add --global vercel@56.5.0
+
+      - name: Pull Vercel project settings
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build production deployment
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy production
+        id: deploy
+        shell: bash
+        run: |
+          deployment_url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")"
+          echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
+          echo "### Vercel production deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "$deployment_url" >> "$GITHUB_STEP_SUMMARY"

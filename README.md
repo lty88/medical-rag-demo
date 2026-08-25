@@ -811,3 +811,99 @@ Embedding 查询模型使用延迟加载，第一次 FAISS 查询需要从磁盘
 - [Huatuo 医疗百科问答](https://huggingface.co/datasets/FreedomIntelligence/huatuo_encyclopedia_qa)
 - [bge-m3-medical-cn](https://huggingface.co/ming0302/bge-m3-medical-cn)
 - [bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)
+
+## 19. 部署到 Vercel
+
+### 19.1 部署边界
+
+本项目采用前后端分离部署。Vercel 只构建并托管 `frontend`，不能直接承载当前完整后端：本地处理后索引约 1.7GB，Embedding 和 Reranker 模型约 4.3GB，而且模型需要常驻内存、单次咨询可能运行数十秒。
+
+```mermaid
+flowchart LR
+    U["用户浏览器"] --> V["Vercel / Vue 前端"]
+    V -->|"VITE_API_BASE_URL / HTTPS"| B["长期运行的 FastAPI 后端"]
+    B --> I["SQLite + FAISS 索引"]
+    B --> M["Embedding + Reranker"]
+    B --> L["OpenAI 兼容 LLM"]
+```
+
+后端可以部署到具有足够磁盘和内存的云服务器、容器服务或 GPU/CPU 实例。后端必须提供公网 HTTPS 地址，并持久化 `backend/data/processed` 与 `backend/data/models`。
+
+### 19.2 已提供的部署文件
+
+- `vercel.json`：从仓库根目录安装并构建 `frontend`，产物为 `frontend/dist`；
+- `.github/workflows/vercel-deploy.yml`：推送 `main` 且前端相关文件变化时自动部署；
+- `frontend/.env.example`：说明生产 API 地址；
+- `backend/.env.example`：提供后端 CORS 配置示例。
+
+### 19.3 创建 Vercel 项目
+
+1. 在 Vercel 新建项目并导入当前 GitHub 仓库。
+2. 项目 Root Directory 保持仓库根目录，不要选择 `frontend`，因为根目录已有 `vercel.json`。
+3. 在 Vercel Project Settings → Environment Variables 添加：
+
+```text
+VITE_API_BASE_URL=https://你的后端域名
+```
+
+地址不要以 `/` 结尾，不要填写 `/api`。例如后端健康检查是 `https://api.example.com/api/health`，这里应填写 `https://api.example.com`。
+
+### 19.4 配置后端 CORS
+
+在后端生产环境变量中填写 Vercel 正式域名：
+
+```dotenv
+CORS_ORIGINS=https://你的项目.vercel.app
+```
+
+如果同时使用正式域名和自定义域名，以逗号分隔：
+
+```dotenv
+CORS_ORIGINS=https://你的项目.vercel.app,https://medical.example.com
+```
+
+修改后必须重启 FastAPI。不要使用 `*`，因为医疗输入属于敏感数据，应只允许明确的前端域名。
+
+### 19.5 配置 GitHub Actions Secrets
+
+先在本地项目根目录登录并关联一次 Vercel 项目：
+
+```bash
+pnpm add --global vercel@56.5.0
+vercel login
+vercel link
+```
+
+关联后，本地 `.vercel/project.json` 中可以看到 `orgId` 和 `projectId`。`.vercel` 已加入 `.gitignore`，不要提交该目录。
+
+在 GitHub 仓库 Settings → Secrets and variables → Actions 中添加：
+
+| Secret | 来源 |
+|---|---|
+| `VERCEL_TOKEN` | Vercel Account Settings → Tokens 创建 |
+| `VERCEL_ORG_ID` | `.vercel/project.json` 的 `orgId` |
+| `VERCEL_PROJECT_ID` | `.vercel/project.json` 的 `projectId` |
+
+随后可以推送 `main` 触发部署，或在 GitHub Actions 页面手动运行 `Deploy Web to Vercel`。
+
+### 19.6 验证部署
+
+依次检查：
+
+```text
+https://你的后端域名/api/health
+https://你的后端域名/api/knowledge/stats
+https://你的前端域名.vercel.app
+```
+
+如果前端可以打开但显示“等待后端连接”，重点检查浏览器 Network：
+
+- 请求仍是 Vercel 自己的 `/api`：Vercel 没有配置 `VITE_API_BASE_URL`，需要重新部署；
+- CORS 拒绝：后端 `CORS_ORIGINS` 缺少当前前端域名，或域名带了错误路径；
+- Mixed Content：前端是 HTTPS，但后端仍是 HTTP，必须给后端配置 HTTPS；
+- 502/504：后端模型未加载完成、内存不足或反向代理超时；
+- 页面显示 `evidence-template`：后端 LLM 配置缺失或调用失败，与 Vercel 前端部署无关。
+
+### 19.7 Preview 部署说明
+
+每个 Vercel Preview 都会产生不同域名，固定的 CORS 白名单不会自动覆盖这些域名。医疗项目建议先只开放 Production 域名；如果确实需要 Preview，应在后端实现经过校验的 Vercel Preview 域名规则，而不是直接把 CORS 改成 `*`。
