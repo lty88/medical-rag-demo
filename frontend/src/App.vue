@@ -1,43 +1,159 @@
 <script setup lang="tsx">
-import { onMounted, ref } from 'vue'
-import { fetchKnowledgeStats, submitConsultation } from './api/client'
-import ArchitectureFlow from './components/ArchitectureFlow.vue'
-import ConsultationForm from './components/ConsultationForm.vue'
-import EvidencePanel from './components/EvidencePanel.vue'
-import PipelineTrace from './components/PipelineTrace.vue'
-import ResultPanel from './components/ResultPanel.vue'
+import { computed, onMounted, ref } from 'vue'
+import { fetchBodyAtlas, fetchKnowledgeStats, submitConsultation } from './api/client'
+import AppSidebar from './components/AppSidebar.vue'
+import ConsultWorkspace from './components/ConsultWorkspace.vue'
+import EvidenceSearch from './components/EvidenceSearch.vue'
+import HealthAtlas from './components/HealthAtlas.vue'
+import KnowledgeWorkspace from './components/KnowledgeWorkspace.vue'
+import ScientificCanvas from './components/ScientificCanvas.vue'
+import SystemMonitor from './components/SystemMonitor.vue'
 import type {
+  AtlasConsultContext,
+  BodyAtlasResponse,
   ConsultationFormState,
   ConsultationResponse,
   KnowledgeStats,
+  WorkspaceKey,
+  WorkspaceMenuItem,
 } from './types'
 
+const menuItems: WorkspaceMenuItem[] = [
+  { key: 'consult', label: '智能问诊', description: '证据约束会话', index: '01' },
+  { key: 'atlas', label: '健康可视化', description: '人体系统图谱', index: '02' },
+  { key: 'research', label: '证据检索', description: '独立混合召回', index: '03' },
+  { key: 'knowledge', label: '知识资产', description: '语料与权限', index: '04' },
+  { key: 'monitor', label: '运行监测', description: '模型与索引', index: '05' },
+]
+
+const activeWorkspace = ref<WorkspaceKey>('consult')
 const loading = ref(false)
 const error = ref('')
 const result = ref<ConsultationResponse | null>(null)
 const stats = ref<KnowledgeStats | null>(null)
+const atlas = ref<BodyAtlasResponse | null>(null)
+const consultDraft = ref<ConsultationFormState>(createInitialConsultationDraft())
+const consultContext = ref<AtlasConsultContext | null>(null)
+const atlasGeneratedPrompt = ref('')
+
+const activeMenu = computed(
+  () => menuItems.find((item) => item.key === activeWorkspace.value) ?? menuItems[0],
+)
 
 /**
- * 读取知识库状态，用于页头展示当前检索实现和文档数量。
+ * 创建可跨工作区保留的初始问诊草稿。
+ * @returns 包含默认人群条件的空白问诊表单
  */
-async function loadStats() {
-  try {
-    stats.value = await fetchKnowledgeStats()
-  } catch {
-    stats.value = null
+function createInitialConsultationDraft(): ConsultationFormState {
+  return {
+    symptoms: '',
+    age: 30,
+    sex: 'unknown',
+    pregnant: false,
+    region: 'CN',
+    duration: '',
+    temperature: null,
+    additional_info: '',
   }
 }
 
 /**
- * 提交咨询表单并保存后端返回的完整安全链路结果。
- * @param form 用户当前填写的症状与人群信息
+ * 并行读取知识库运行状态与人体系统图谱。
  */
-async function handleSubmit(form: ConsultationFormState) {
+async function loadWorkspaceData() {
+  const [statsResult, atlasResult] = await Promise.allSettled([
+    fetchKnowledgeStats(),
+    fetchBodyAtlas(),
+  ])
+  stats.value = statsResult.status === 'fulfilled' ? statsResult.value : null
+  atlas.value = atlasResult.status === 'fulfilled' ? atlasResult.value : null
+}
+
+/**
+ * 切换一级工作区并清理跨页面错误提示。
+ * @param workspace 要打开的工作区标识
+ */
+function changeWorkspace(workspace: WorkspaceKey) {
+  activeWorkspace.value = workspace
+  error.value = ''
+}
+
+/**
+ * 保存问诊组件最新草稿，使页面切换后仍可继续填写。
+ * @param draft 当前问诊表单快照
+ */
+function updateConsultDraft(draft: ConsultationFormState) {
+  consultDraft.value = draft
+}
+
+/**
+ * 清除健康可视化导航上下文，不改变用户已经填写的症状。
+ */
+function clearConsultContext() {
+  consultContext.value = null
+}
+
+/**
+ * 判断症状文本是否仍是系统生成、尚未补充的图谱引导语。
+ * @param symptoms 当前症状文本
+ * @returns 文本是否可由新的图谱选择安全替换
+ */
+function isAtlasPrompt(symptoms: string) {
+  const normalized = symptoms.trim()
+  return /^我想咨询与“.+”相关的不适：$/.test(normalized)
+    || normalized === atlasGeneratedPrompt.value
+}
+
+/**
+ * 把图谱中多部位、多症状选择转换为自然的问诊描述。
+ * @param context 健康可视化生成的结构化问诊上下文
+ * @returns 可直接继续补充的中文症状描述
+ */
+function buildAtlasSymptomPrompt(context: AtlasConsultContext) {
+  const modelLabel = context.anatomy_model === 'female' ? '女性腹盆躯干图谱' : '男性全身图谱'
+  if (!context.complaints.length) {
+    return `我通过${modelLabel}选择了“${context.organ_name}”，想咨询相关不适：`
+  }
+  const descriptions = context.complaints.map((complaint) => {
+    const details = [
+      complaint.symptoms.map((symptom) => symptom.label).join('、'),
+      complaint.description.trim(),
+    ].filter(Boolean)
+    return `${complaint.region_name}：${details.join('；') || '具体表现待补充'}`
+  })
+  return `我从${modelLabel}选择了以下不适：${descriptions.join('；')}。`
+}
+
+/**
+ * 将健康可视化中选定的系统与器官带入智能问诊，并保留用户已有内容。
+ * @param context 当前图谱选择形成的问诊导航上下文
+ */
+function startConsultFromAtlas(context: AtlasConsultContext) {
+  const currentSymptoms = consultDraft.value.symptoms.trim()
+  const shouldPrefill = !currentSymptoms || isAtlasPrompt(currentSymptoms)
+  const nextPrompt = buildAtlasSymptomPrompt(context)
+  consultContext.value = context
+  atlasGeneratedPrompt.value = nextPrompt
+  consultDraft.value = {
+    ...consultDraft.value,
+    symptoms: shouldPrefill
+      ? nextPrompt
+      : consultDraft.value.symptoms,
+  }
+  result.value = null
+  changeWorkspace('consult')
+}
+
+/**
+ * 提交问诊资料并保存完整 RAG 安全链路响应。
+ * @param form 用户填写的症状和基础人群信息
+ */
+async function handleConsult(form: ConsultationFormState) {
   loading.value = true
   error.value = ''
   result.value = null
   try {
-    result.value = await submitConsultation(form)
+    result.value = await submitConsultation(form, consultContext.value)
   } catch (requestError) {
     error.value = requestError instanceof Error ? requestError.message : '请求失败，请检查后端服务。'
   } finally {
@@ -45,128 +161,62 @@ async function handleSubmit(form: ConsultationFormState) {
   }
 }
 
-onMounted(loadStats)
+onMounted(loadWorkspaceData)
 </script>
 
 <template>
-  <main>
-    <header class="hero">
-      <nav class="topbar">
-        <a class="brand" href="#">
-          <span class="brand-mark">M</span>
-          <span>
-            <strong>MedRAG Lab</strong>
-            <small>中文医疗混合检索台</small>
+  <main class="med-app-shell">
+    <AppSidebar
+      :active="activeWorkspace"
+      :items="menuItems"
+      :stats="stats"
+      @change="changeWorkspace"
+    />
+
+    <section class="med-app-main">
+      <ScientificCanvas :mode="activeWorkspace" />
+      <header class="med-topbar">
+        <div>
+          <span class="topbar-index">{{ activeMenu.index }}</span>
+          <div>
+            <strong>{{ activeMenu.label }}</strong>
+            <small>{{ activeMenu.description }}</small>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span :class="['service-state', { offline: !stats }]">
+            <i /> {{ stats ? 'SERVICE ONLINE' : 'SERVICE OFFLINE' }}
           </span>
-        </a>
-        <div class="topbar-status">
-          <span class="live-dot" />
-          <span v-if="stats">已载入 {{ stats.total_documents.toLocaleString() }} 条文档</span>
-          <span v-else>等待后端连接</span>
+          <span class="date-chip">MEDICAL RAG · RESEARCH CONSOLE</span>
         </div>
-      </nav>
+      </header>
 
-      <div class="hero-grid">
-        <div class="hero-copy">
-          <p class="hero-kicker">MEDICAL RAG / SAFETY FIRST</p>
-          <h1>让每一次回答，<br /><em>先经过安全。</em></h1>
-          <p class="hero-description">
-            全量中文医疗 Embedding 与 BM25 双路独立召回，再由 RRF、医疗 Reranker 和安全规则共同决定最终证据。
-          </p>
-          <div class="hero-metrics">
-            <div>
-              <strong>2</strong>
-              <span>路混合召回</span>
-            </div>
-            <div>
-              <strong>6</strong>
-              <span>层安全处理</span>
-            </div>
-            <div>
-              <strong>0</strong>
-              <span>默认治疗权限</span>
-            </div>
-          </div>
-        </div>
-
-        <aside class="system-card">
-          <div class="system-card-header">
-            <span>运行配置</span>
-            <span class="system-state">{{ stats?.vector_index_ready ? 'FULL HYBRID' : 'INDEX NOT READY' }}</span>
-          </div>
-          <dl>
-            <div>
-              <dt>Vector</dt>
-              <dd>{{ stats?.vector_mode ?? 'offline' }}</dd>
-            </div>
-            <div>
-              <dt>Reranker</dt>
-              <dd>{{ stats?.reranker_mode ?? 'offline' }}</dd>
-            </div>
-            <div>
-              <dt>Generation</dt>
-              <dd :class="stats?.llm_ready ? 'safe-value' : 'warning-value'">
-                {{ stats?.llm_ready ? `${stats.llm_model} / CONFIGURED` : 'EVIDENCE TEMPLATE' }}
-              </dd>
-            </div>
-            <div>
-              <dt>Corpus</dt>
-              <dd>{{ stats?.vector_document_count.toLocaleString() ?? 0 }} vectors</dd>
-            </div>
-            <div>
-              <dt>Safety gate</dt>
-              <dd class="safe-value">ENABLED</dd>
-            </div>
-          </dl>
-          <p>Huatuo 问答默认仅参与召回，不获得治疗生成权限。</p>
-        </aside>
-      </div>
-    </header>
-
-    <ArchitectureFlow />
-
-    <section class="workspace">
-      <ConsultationForm :loading="loading" @submit="handleSubmit" />
-
-      <div class="output-column">
-        <div v-if="error" class="request-error" role="alert">
-          <strong>无法完成请求</strong>
-          <span>{{ error }}</span>
-        </div>
-
-        <section v-if="loading" class="panel generation-loading" aria-live="polite">
-          <div class="generation-pulse" aria-hidden="true"><span /></div>
-          <p class="eyebrow">RETRIEVE · RERANK · GENERATE</p>
-          <h2>正在组织有出处的回答</h2>
-          <p>系统正在完成双路召回、医疗精排和证据约束生成，请稍候。</p>
-          <div class="loading-track"><span /></div>
-        </section>
-
-        <template v-else-if="result">
-          <ResultPanel :result="result" />
-          <div class="detail-grid">
-            <PipelineTrace :steps="result.pipeline" />
-            <EvidencePanel
-              :citations="result.citations"
-              :generation-mode="result.generation_mode"
-            />
-          </div>
-        </template>
-
-        <section v-else class="panel empty-output">
-          <div class="empty-orbit" aria-hidden="true">
-            <span />
-          </div>
-          <p class="eyebrow">READY FOR TRACE</p>
-          <h2>选择一个场景，观察系统如何决策</h2>
-          <p>普通咨询会完成全部步骤；急症在分诊处中止；治疗请求会在证据权限校验时被拒绝。</p>
-        </section>
+      <div class="workspace-stage">
+        <ConsultWorkspace
+          v-if="activeWorkspace === 'consult'"
+          :loading="loading"
+          :error="error"
+          :result="result"
+          :stats="stats"
+          :draft="consultDraft"
+          :atlas-context="consultContext"
+          @submit="handleConsult"
+          @update-draft="updateConsultDraft"
+          @clear-atlas-context="clearConsultContext"
+          @open-research="changeWorkspace('research')"
+        />
+        <HealthAtlas
+          v-else-if="activeWorkspace === 'atlas'"
+          :atlas="atlas"
+          @start-consult="startConsultFromAtlas"
+        />
+        <EvidenceSearch v-else-if="activeWorkspace === 'research'" />
+        <KnowledgeWorkspace
+          v-else-if="activeWorkspace === 'knowledge'"
+          :stats="stats"
+        />
+        <SystemMonitor v-else :stats="stats" @refresh="loadWorkspaceData" />
       </div>
     </section>
-
-    <footer class="page-footer">
-      <span>MedRAG Lab · 全量混合检索</span>
-      <span>不是医疗器械，不提供诊断或处方</span>
-    </footer>
   </main>
 </template>

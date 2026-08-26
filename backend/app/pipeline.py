@@ -17,6 +17,9 @@ from app.models import (
     KnowledgeStats,
     PipelineStep,
     RankedDocument,
+    ResearchEvidence,
+    ResearchSearchRequest,
+    ResearchSearchResponse,
     SourceDocument,
 )
 from app.services.corpus import build_stats, load_documents
@@ -237,6 +240,11 @@ class MedicalRagPipeline:
                     "region": request.region,
                     "duration": request.duration,
                     "temperature": request.temperature,
+                    "visual_context": (
+                        request.visual_context.model_dump()
+                        if request.visual_context
+                        else None
+                    ),
                     "redacted_types": list(privacy.redacted_types),
                 },
                 ensure_ascii=False,
@@ -297,6 +305,86 @@ class MedicalRagPipeline:
                 },
                 ensure_ascii=False,
             ),
+        )
+
+    def search_research_evidence(
+        self,
+        request: ResearchSearchRequest,
+    ) -> ResearchSearchResponse:
+        """执行不触发答案生成的 BM25、FAISS、RRF 与医疗精排。
+
+        Args:
+            request: 研究检索词和期望结果数量。
+
+        Returns:
+            包含多阶段分数、出处和检索模式的证据结果。
+        """
+
+        request_id = uuid.uuid4().hex[:12]
+        query = redact_privacy(request.query).text
+        started_at = time.perf_counter()
+        if self.persistent_index is not None:
+            bm25_matches = self.persistent_index.search(query, self.settings.bm25_top_k)
+            if self.faiss_index is not None:
+                vector_rows = self.faiss_index.search(query, self.settings.vector_top_k)
+                documents_by_rowid = self.persistent_index.get_by_rowids(
+                    [rowid for rowid, _ in vector_rows]
+                )
+                vector_matches = [
+                    (documents_by_rowid[rowid], score)
+                    for rowid, score in vector_rows
+                    if rowid in documents_by_rowid
+                ]
+                vector_mode = self.faiss_index.mode
+            else:
+                vector_matches = []
+                vector_mode = "FAISS 未就绪"
+            keyword_mode = "SQLite FTS5/BM25"
+        else:
+            assert self.bm25 is not None
+            bm25_index_matches = self.bm25.search(query, self.settings.retrieval_top_k)
+            bm25_matches = [
+                (self.documents[index], score)
+                for index, score in bm25_index_matches
+            ]
+            vector_matches = []
+            keyword_mode = "内存 BM25"
+            vector_mode = "FAISS 未就绪"
+
+        mixed = reciprocal_rank_fusion(
+            bm25_matches,
+            vector_matches,
+            self.settings.rrf_top_k,
+        )
+        reranked = self.reranker.rerank(query, mixed)[: request.top_k]
+        self._log_retrieval_results(request_id, "研究检索", reranked)
+        results = [
+            ResearchEvidence(
+                id=item.document.id,
+                title=item.document.title,
+                question=item.document.question,
+                excerpt=item.document.content[:600],
+                source=item.document.source,
+                source_type=item.document.source_type,
+                trust_level=item.document.trust_level,
+                source_url=item.document.source_url,
+                allow_treatment_generation=item.document.allow_treatment_generation,
+                bm25_score=round(item.bm25_score, 6),
+                vector_score=round(item.vector_score, 6),
+                rrf_score=round(item.rrf_score, 6),
+                rerank_score=round(item.rerank_score, 6),
+            )
+            for item in reranked
+        ]
+        return ResearchSearchResponse(
+            request_id=request_id,
+            query=query,
+            total=len(results),
+            results=results,
+            retrieval_mode=(
+                f"{keyword_mode} + {vector_mode} + RRF + {self.reranker.mode}"
+            ),
+            duration_ms=round((time.perf_counter() - started_at) * 1000),
         )
 
     def consult(self, request: ConsultationRequest) -> ConsultationResponse:
@@ -380,7 +468,43 @@ class MedicalRagPipeline:
             lambda: structure_symptoms(request, privacy.text),
         )
         follow_up_questions = structured["missing"]
-        retrieval_query = privacy.text
+        visual_context_text = ""
+        if request.visual_context:
+            selected_complaints = [
+                (
+                    f"{complaint.region_name}："
+                    + "；".join(
+                        item
+                        for item in [
+                            "、".join(
+                                symptom.query_text
+                                for symptom in complaint.symptoms
+                            ),
+                            complaint.description,
+                        ]
+                        if item
+                    )
+                )
+                for complaint in request.visual_context.complaints
+            ]
+            visual_context_text = "\n".join(
+                [
+                    "健康可视化导航上下文（用户在人体图谱中主动选择）：",
+                    (
+                        "解剖参考模型：女性腹盆躯干参考（非完整全身）"
+                        if request.visual_context.anatomy_model == "female"
+                        else "解剖参考模型：男性全身参考"
+                    ),
+                    f"人体系统：{request.visual_context.system_name}",
+                    f"关注器官：{request.visual_context.organ_name}",
+                    f"结构说明：{request.visual_context.organ_summary}",
+                    f"一般观察线索：{request.visual_context.observation}",
+                    *selected_complaints,
+                ]
+            )
+        retrieval_query = "\n\n".join(
+            item for item in [privacy.text, visual_context_text] if item
+        )
         if self.persistent_index is not None:
             bm25_matches = self._run_stage(
                 steps,
@@ -500,7 +624,7 @@ class MedicalRagPipeline:
             "结构化答案生成",
             lambda result: f"生成模式：{result.mode}；{result.detail}",
             lambda: self.generator.generate(
-                privacy.text,
+                retrieval_query,
                 final_candidates,
                 follow_up_questions,
                 treatment_intent,

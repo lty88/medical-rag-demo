@@ -7,6 +7,44 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+class ConsultationVisualSymptom(BaseModel):
+    """用户在人体图谱某个部位勾选的通俗症状。"""
+
+    id: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=100)
+    query_text: str = Field(min_length=1, max_length=200)
+
+
+class ConsultationVisualComplaint(BaseModel):
+    """人体图谱中一个已选择部位及其症状集合。"""
+
+    region_id: str = Field(min_length=1, max_length=100)
+    region_name: str = Field(min_length=1, max_length=100)
+    structure_label: str = Field(default="", max_length=200)
+    description: str = Field(default="", max_length=500)
+    symptoms: list[ConsultationVisualSymptom] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+
+
+class ConsultationVisualContext(BaseModel):
+    """健康可视化传入问诊链路的导航上下文。"""
+
+    source: Literal["health_atlas"] = "health_atlas"
+    anatomy_model: Literal["male", "female"] = "male"
+    system_id: str = Field(min_length=1, max_length=64)
+    system_name: str = Field(min_length=1, max_length=100)
+    organ_id: str = Field(min_length=1, max_length=64)
+    organ_name: str = Field(min_length=1, max_length=100)
+    organ_summary: str = Field(default="", max_length=500)
+    observation: str = Field(default="", max_length=500)
+    complaints: list[ConsultationVisualComplaint] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+
+
 class ConsultationRequest(BaseModel):
     """用户提交的症状与基本人群信息。"""
 
@@ -18,6 +56,7 @@ class ConsultationRequest(BaseModel):
     duration: str | None = Field(default=None, max_length=100)
     temperature: float | None = Field(default=None, ge=30, le=45)
     additional_info: str | None = Field(default=None, max_length=1000)
+    visual_context: ConsultationVisualContext | None = None
 
     @field_validator("pregnant")
     @classmethod
@@ -157,3 +196,114 @@ class KnowledgeStats(BaseModel):
     llm_ready: bool
     llm_model: str | None
     capped: bool
+
+
+class ResearchSearchRequest(BaseModel):
+    """研究工作台提交的独立证据检索条件。"""
+
+    query: str = Field(min_length=2, max_length=500)
+    top_k: int = Field(default=8, ge=1, le=20)
+
+
+class ResearchEvidence(BaseModel):
+    """面向研究人员展示的单条混合检索证据。"""
+
+    id: str
+    title: str
+    question: str
+    excerpt: str
+    source: str
+    source_type: str
+    trust_level: str
+    source_url: str | None
+    allow_treatment_generation: bool
+    bm25_score: float
+    vector_score: float
+    rrf_score: float
+    rerank_score: float
+
+
+class ResearchSearchResponse(BaseModel):
+    """独立证据检索、混排与精排的完整响应。"""
+
+    request_id: str
+    query: str
+    total: int
+    results: list[ResearchEvidence]
+    retrieval_mode: str
+    duration_ms: int
+
+
+class AtlasSymptomOption(BaseModel):
+    """身体部位可供普通用户勾选的通俗症状表现。"""
+
+    id: str
+    label: str
+    query_text: str
+
+
+class AtlasOrgan(BaseModel):
+    """健康可视化中的器官或结构说明。"""
+
+    id: str
+    name: str
+    summary: str
+    observation: str
+    mesh_aliases: list[str] = Field(default_factory=list)
+    symptom_options: list[AtlasSymptomOption] = Field(default_factory=list)
+    available_models: list[Literal["male", "female"]] = Field(
+        default_factory=lambda: ["male", "female"]
+    )
+
+
+class AtlasBodyRegion(BaseModel):
+    """可由三维体表模型点击定位的细分身体区域。"""
+
+    id: str
+    name: str
+    english_name: str
+    group: str
+    side: Literal["left", "right", "middle", "bilateral"]
+    system_id: str = "regional"
+    location: str
+    summary: str
+    mesh_aliases: list[str]
+    symptom_options: list[AtlasSymptomOption]
+
+
+class AtlasSystem(BaseModel):
+    """健康可视化中的人体系统说明。"""
+
+    id: str
+    name: str
+    english_name: str
+    color: str
+    summary: str
+    organs: list[AtlasOrgan]
+    available_models: list[Literal["male", "female"]] = Field(
+        default_factory=lambda: ["male", "female"]
+    )
+
+
+class AtlasModelProfile(BaseModel):
+    """健康可视化可切换的解剖模型及其医学覆盖范围。"""
+
+    id: Literal["male", "female"]
+    name: str
+    english_name: str
+    description: str
+    coverage: str
+    structure_count: int
+    available_system_ids: list[str]
+
+
+class BodyAtlasResponse(BaseModel):
+    """人体系统认知页面使用的医学科普数据。"""
+
+    title: str
+    description: str
+    systems: list[AtlasSystem]
+    body_regions: list[AtlasBodyRegion]
+    models: list[AtlasModelProfile]
+    default_model: Literal["male", "female"] = "male"
+    disclaimer: str

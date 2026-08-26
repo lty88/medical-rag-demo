@@ -9,8 +9,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.models import ConsultationRequest, ConsultationResponse, KnowledgeStats
+from app.models import (
+    BodyAtlasResponse,
+    ConsultationRequest,
+    ConsultationResponse,
+    KnowledgeStats,
+    ResearchSearchRequest,
+    ResearchSearchResponse,
+)
 from app.pipeline import MedicalRagPipeline
+from app.services.atlas import build_body_atlas
 
 
 pipeline = MedicalRagPipeline(settings)
@@ -69,6 +77,31 @@ def knowledge_stats() -> KnowledgeStats:
     """
 
     return pipeline.stats()
+
+
+@app.get("/api/atlas/body", response_model=BodyAtlasResponse)
+def body_atlas() -> BodyAtlasResponse:
+    """返回健康可视化页面的人体系统科普图谱。
+
+    Returns:
+        人体系统、器官说明和非诊断边界。
+    """
+
+    return build_body_atlas()
+
+
+@app.post("/api/research/search", response_model=ResearchSearchResponse)
+def research_search(request: ResearchSearchRequest) -> ResearchSearchResponse:
+    """执行不经过 LLM 生成的可解释医疗证据检索。
+
+    Args:
+        request: 检索问题和希望返回的证据数量。
+
+    Returns:
+        BM25、FAISS、RRF 与 Reranker 精排后的证据列表。
+    """
+
+    return pipeline.search_research_evidence(request)
 
 
 @app.post("/api/consult", response_model=ConsultationResponse)

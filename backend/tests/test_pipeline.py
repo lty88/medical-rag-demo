@@ -10,8 +10,9 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from app.config import BASE_DIR, Settings
-from app.models import ConsultationRequest, SourceDocument
+from app.models import ConsultationRequest, ResearchSearchRequest, SourceDocument
 from app.pipeline import MedicalRagPipeline
+from app.services.atlas import build_body_atlas
 from app.services.embedding_text import build_embedding_text
 from app.services.generator import EvidenceBoundGenerator
 from app.services.persistent_index import build_fts_query
@@ -298,6 +299,19 @@ class GeneratorTests(unittest.TestCase):
         self.assertNotIn("secret-test-key", "\n".join(captured_logs.output))
 
 
+class AtlasTests(unittest.TestCase):
+    """验证健康可视化数据具有系统层级和非诊断边界。"""
+
+    def test_body_atlas_contains_systems_and_safety_boundary(self) -> None:
+        """人体图谱应包含核心系统并明确不构成个体诊断。"""
+
+        atlas = build_body_atlas()
+
+        self.assertGreaterEqual(len(atlas.systems), 6)
+        self.assertTrue(any(system.id == "circulatory" for system in atlas.systems))
+        self.assertIn("不构成诊断", atlas.disclaimer)
+
+
 class PipelineTests(unittest.TestCase):
     """验证普通、急症和治疗请求三条核心路径。"""
 
@@ -379,6 +393,24 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(response.blocked)
         self.assertEqual(response.urgency, "insufficient")
         self.assertIn("当前证据均无治疗生成权限", response.validation_issues)
+
+    def test_research_search_returns_ranked_evidence_without_generation(self) -> None:
+        """研究检索应返回精排分数和来源，不进入答案生成器。"""
+
+        with self.assertLogs(
+            "uvicorn.error.medical_rag.pipeline", level="INFO"
+        ) as captured_logs:
+            response = self.pipeline.search_research_evidence(
+                ResearchSearchRequest(query="头痛需要关注什么", top_k=3)
+            )
+
+        self.assertTrue(response.results)
+        self.assertLessEqual(response.total, 3)
+        self.assertTrue(response.results[0].source)
+        self.assertGreaterEqual(response.results[0].rerank_score, 0)
+        log_text = "\n".join(captured_logs.output)
+        self.assertIn("[检索结果][研究检索]", log_text)
+        self.assertNotIn("[LLM请求]", log_text)
 
 
 if __name__ == "__main__":
