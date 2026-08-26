@@ -161,6 +161,7 @@ body::before {
 .anatomy-controls button { padding: 7px 10px; border: 1px solid rgba(117,225,209,.14); border-radius: 18px; color: var(--muted); background: rgba(3,15,23,.68); font-size: 9px; backdrop-filter: blur(10px); }
 .anatomy-controls button i { margin-right: 5px; color: var(--mint); font-style: normal; }
 .anatomy-controls button:hover, .anatomy-controls button.active { border-color: rgba(117,225,209,.38); color: var(--ink); }
+.anatomy-controls button:disabled { opacity: .38; cursor: not-allowed; }
 .anatomy-interaction-hint { position: absolute; z-index: 7; bottom: 21px; left: 50%; display: flex; gap: 8px; align-items: center; padding: 7px 11px; transform: translateX(-50%); border: 1px solid rgba(117,225,209,.12); border-radius: 18px; color: #52736d; background: rgba(3,15,23,.62); font-family: ui-monospace, monospace; font-size: 8px; white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
 .anatomy-interaction-hint i { width: 2px; height: 2px; border-radius: 50%; background: #52736d; }
 .anatomy-credit { position: absolute; z-index: 7; bottom: 22px; left: 52px; color: #456963; font-family: ui-monospace, monospace; font-size: 8px; text-decoration: none; transition: color 160ms ease; }

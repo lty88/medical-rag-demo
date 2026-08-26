@@ -351,13 +351,19 @@ export async function createAnatomyScene(
   const controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
   controls.dampingFactor = 0.065
-  controls.enablePan = false
+  controls.enablePan = true
+  controls.screenSpacePanning = true
   controls.minDistance = 3.2
   controls.maxDistance = 28
   controls.minPolarAngle = Math.PI * 0.27
   controls.maxPolarAngle = Math.PI * 0.73
   controls.target.set(0, -0.15, 0)
   controls.autoRotate = false
+  controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
+  controls.mouseButtons.MIDDLE = THREE.MOUSE.DOLLY
+  controls.mouseButtons.RIGHT = THREE.MOUSE.PAN
+  controls.touches.ONE = THREE.TOUCH.ROTATE
+  controls.touches.TWO = THREE.TOUCH.DOLLY_PAN
 
   scene.add(new THREE.HemisphereLight(0xb7fbff, 0x050a10, 2.2))
   const keyLight = new THREE.DirectionalLight(0xb1fff2, 3.8)
@@ -456,12 +462,22 @@ export async function createAnatomyScene(
   let activeSystemId = options.activeSystemId
   let animationFrameId = 0
   let hoverFrameId = 0
+  let selectionTimerId = 0
   let pendingHoverEvent: PointerEvent | null = null
   const selectedMaterials = new Map<
     AnatomyMesh,
     { base: AnatomyMaterial; highlight: AnatomyMaterial }
   >()
   let disposed = false
+
+  /**
+   * 用户开始手动旋转、缩放或平移时终止自动镜头过渡，保证操作立即接管相机。
+   */
+  function cancelFocusTransition() {
+    focusTransition = null
+  }
+
+  controls.addEventListener('start', cancelFocusTransition)
 
   /**
    * 清除当前点击网格的独立高亮材质并恢复所属解剖层材质。
@@ -528,14 +544,13 @@ export async function createAnatomyScene(
   }
 
   /**
-   * 根据真实系统包围盒计算完整可见距离，并平滑移动相机完成定位放大。
-   * @param systemId 要完整展示的人体系统标识
+   * 根据三维对象包围盒计算完整可见距离，并平滑移动相机完成定位放大。
+   * @param targetObject 要聚焦的系统根节点或精细器官网格
+   * @param padding 镜头边缘留白倍率，数值越大视野越宽
    */
-  function focusSystem(systemId: string) {
-    const layer = loadedLayers.get(systemId as AnatomyLayerId)
-    if (!layer) return
+  function focusObject(targetObject: THREE.Object3D, padding: number) {
     anatomyRoot.updateMatrixWorld(true)
-    const bounds = new THREE.Box3().setFromObject(layer.root)
+    const bounds = new THREE.Box3().setFromObject(targetObject)
     const size = bounds.getSize(new THREE.Vector3())
     const center = bounds.getCenter(new THREE.Vector3())
     if (!Number.isFinite(size.y) || size.lengthSq() <= 0) return
@@ -545,7 +560,7 @@ export async function createAnatomyScene(
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect)
     const fitWidthDistance = size.x / (2 * Math.tan(horizontalFov / 2))
     const fitDistance = THREE.MathUtils.clamp(
-      Math.max(fitHeightDistance, fitWidthDistance, size.z * 1.5) * 1.06,
+      Math.max(fitHeightDistance, fitWidthDistance, size.z * 1.5) * padding,
       controls.minDistance,
       controls.maxDistance,
     )
@@ -557,6 +572,32 @@ export async function createAnatomyScene(
       toPosition: center.clone().add(viewDirection.multiplyScalar(fitDistance)),
       fromTarget: controls.target.clone(),
       toTarget: center,
+    }
+  }
+
+  /**
+   * 根据真实系统包围盒平滑移动相机，完整展示该系统并保留少量边缘空间。
+   * @param systemId 要完整展示的人体系统标识
+   */
+  function focusSystem(systemId: string) {
+    const layer = loadedLayers.get(systemId as AnatomyLayerId)
+    if (!layer) return
+    focusObject(layer.root, 1.06)
+  }
+
+  /**
+   * 按原始网格名称定位精细身体结构，并将相机移动到适合局部观察的距离。
+   * @param rawName 三维模型中的原始结构名称
+   */
+  function focusStructure(rawName: string) {
+    for (const layer of loadedLayers.values()) {
+      const mesh = layer.meshes.find(
+        (item) => String(item.userData.rawName ?? item.name) === rawName,
+      )
+      if (mesh) {
+        focusObject(mesh, 1.7)
+        return
+      }
     }
   }
 
@@ -662,8 +703,13 @@ export async function createAnatomyScene(
     if (movement > 5) {
       return
     }
-    const mesh = pickOrgan(event)
-    if (mesh) {
+    window.clearTimeout(selectionTimerId)
+    const clientX = event.clientX
+    const clientY = event.clientY
+    selectionTimerId = window.setTimeout(() => {
+      const syntheticEvent = new PointerEvent('pointerup', { clientX, clientY })
+      const mesh = pickOrgan(syntheticEvent)
+      if (!mesh) return
       highlightSelectedStructure(mesh)
       options.onSystemSelect(mesh.userData.systemId as AnatomySystemId)
       options.onStructureSelect({
@@ -671,7 +717,22 @@ export async function createAnatomyScene(
         label: String(mesh.userData.organLabel ?? 'Anatomical structure'),
         rawName: String(mesh.userData.rawName ?? mesh.name),
       })
-    }
+    }, 220)
+  }
+
+  /**
+   * 双击真实身体结构时取消单击选择计时，并将镜头直接定位到该结构。
+   * @param event 画布双击事件
+   */
+  function handleDoubleClick(event: MouseEvent) {
+    window.clearTimeout(selectionTimerId)
+    const pointerEvent = new PointerEvent('pointerup', {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    })
+    const mesh = pickOrgan(pointerEvent)
+    if (!mesh) return
+    focusObject(mesh, 1.7)
   }
 
   /**
@@ -735,10 +796,13 @@ export async function createAnatomyScene(
     disposed = true
     window.cancelAnimationFrame(animationFrameId)
     window.cancelAnimationFrame(hoverFrameId)
+    window.clearTimeout(selectionTimerId)
     renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
     renderer.domElement.removeEventListener('pointermove', handlePointerMove)
     renderer.domElement.removeEventListener('pointerup', handlePointerUp)
     renderer.domElement.removeEventListener('pointerleave', handlePointerLeave)
+    renderer.domElement.removeEventListener('dblclick', handleDoubleClick)
+    controls.removeEventListener('start', cancelFocusTransition)
     clearSelectedStructures()
     controls.dispose()
     dracoLoader.dispose()
@@ -752,6 +816,7 @@ export async function createAnatomyScene(
   renderer.domElement.addEventListener('pointermove', handlePointerMove)
   renderer.domElement.addEventListener('pointerup', handlePointerUp)
   renderer.domElement.addEventListener('pointerleave', handlePointerLeave)
+  renderer.domElement.addEventListener('dblclick', handleDoubleClick)
   resize()
   resetView()
   setActiveSystem(activeSystemId)
@@ -761,6 +826,7 @@ export async function createAnatomyScene(
   return {
     setActiveSystem,
     focusSystem,
+    focusStructure,
     setSelectedStructures,
     setAutoRotate,
     resize,

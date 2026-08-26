@@ -202,6 +202,14 @@ function resetView() {
 }
 
 /**
+ * 将三维镜头定位到指定原始网格，便于观察已选择的局部身体结构。
+ * @param rawName 三维模型中的原始结构名称
+ */
+function focusStructure(rawName: string) {
+  controller?.focusStructure(rawName)
+}
+
+/**
  * 设置三维人体是否保持缓慢自动旋转。
  * @param enabled 是否启用自动旋转
  */
@@ -227,7 +235,7 @@ watch(getAutoRotate, syncAutoRotate)
 onMounted(initializeScene)
 onBeforeUnmount(disposeScene)
 
-defineExpose<AnatomySceneExposed>({ resetView, setAutoRotate })
+defineExpose<AnatomySceneExposed>({ resetView, focusStructure, setAutoRotate })
 </script>
 
 <template>
@@ -264,7 +272,7 @@ defineExpose<AnatomySceneExposed>({ resetView, setAutoRotate })
     >
       <i />
       <span>{{ hoverInfo.label }}</span>
-      <small>点击选择 · 再次点击取消</small>
+      <small>点击选择 · 双击局部放大</small>
     </div>
   </div>
 </template>

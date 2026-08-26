@@ -17,7 +17,7 @@ async function loadThreeAnatomyScene() {
 
 const ThreeAnatomyScene = defineAsyncComponent(loadThreeAnatomyScene)
 
-defineProps<{
+const props = defineProps<{
   systems: AtlasSystem[]
   modelId: AnatomyModelId
   modelName: string
@@ -83,6 +83,14 @@ function resumeAutoRotateAfterHover() {
 function resetView() {
   sceneRef.value?.resetView()
 }
+
+/**
+ * 聚焦最后选择的三维身体结构，未选择真实网格时不改变当前镜头。
+ */
+function focusSelectedStructure() {
+  const rawName = [...props.selectedStructureNames].reverse().find(Boolean)
+  if (rawName) sceneRef.value?.focusStructure(rawName)
+}
 </script>
 
 <template>
@@ -120,12 +128,20 @@ function resetView() {
         <i>↻</i>{{ isAutoRotating ? (isPointerInside ? '悬停已暂停' : '自动旋转中') : '自动旋转' }}
       </button>
       <button type="button" @click="resetView"><i>⌖</i>正面复位</button>
+      <button
+        type="button"
+        :disabled="!selectedStructureNames.length"
+        @click="focusSelectedStructure"
+      >
+        <i>◎</i>聚焦选中部位
+      </button>
     </div>
 
     <div class="anatomy-interaction-hint">
-      <span>拖拽旋转</span><i />
+      <span>左键旋转</span><i />
+      <span>右键拖动</span><i />
       <span>滚轮缩放</span><i />
-      <span>点击选择 / 再次取消</span>
+      <span>双击局部放大</span>
     </div>
 
     <a
