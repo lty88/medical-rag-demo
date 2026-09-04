@@ -4,6 +4,8 @@ import type {
   ConsultationResponse,
   BodyAtlasResponse,
   KnowledgeStats,
+  MedicalDocumentInterpretationResponse,
+  MedicalDocumentType,
   ResearchSearchForm,
   ResearchSearchResponse,
 } from '../types'
@@ -98,4 +100,32 @@ export async function searchResearchEvidence(
   })
   if (!response.ok) throw new Error(await readError(response))
   return (await response.json()) as ResearchSearchResponse
+}
+
+/**
+ * 上传单份病历或检查报告，并触发文字提取、本地 RAG 与结构化模型解读。
+ * @param file 用户选择的 PDF、文本或报告图片
+ * @param documentType 用户声明的医疗资料类型
+ * @param symptomDescription 用户选填的症状和就诊背景
+ * @param interpretationFocus 用户希望重点理解的方向
+ * @returns 关键发现、风险提示、问医生问题和本地证据
+ */
+export async function interpretMedicalDocument(
+  file: File,
+  documentType: MedicalDocumentType,
+  symptomDescription: string,
+  interpretationFocus: string,
+): Promise<MedicalDocumentInterpretationResponse> {
+  const payload = new FormData()
+  payload.append('file', file)
+  payload.append('document_type', documentType)
+  payload.append('symptom_description', symptomDescription)
+  payload.append('interpretation_focus', interpretationFocus)
+  payload.append('sensitive_data_consent', 'true')
+  const response = await fetch(apiUrl('/api/documents/interpret'), {
+    method: 'POST',
+    body: payload,
+  })
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as MedicalDocumentInterpretationResponse
 }

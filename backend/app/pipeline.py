@@ -499,6 +499,12 @@ class MedicalRagPipeline:
                     f"关注器官：{request.visual_context.organ_name}",
                     f"结构说明：{request.visual_context.organ_summary}",
                     f"一般观察线索：{request.visual_context.observation}",
+                    (
+                        "初诊科室参考："
+                        + "、".join(request.visual_context.suggested_departments)
+                        if request.visual_context.suggested_departments
+                        else "初诊科室参考：未指定"
+                    ),
                     *selected_complaints,
                 ]
             )

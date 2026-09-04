@@ -6,6 +6,7 @@ import ConsultWorkspace from './components/ConsultWorkspace.vue'
 import EvidenceSearch from './components/EvidenceSearch.vue'
 import HealthAtlas from './components/HealthAtlas.vue'
 import KnowledgeWorkspace from './components/KnowledgeWorkspace.vue'
+import MedicalRecordWorkspace from './components/MedicalRecordWorkspace.vue'
 import ScientificCanvas from './components/ScientificCanvas.vue'
 import SystemMonitor from './components/SystemMonitor.vue'
 import type {
@@ -21,9 +22,10 @@ import type {
 const menuItems: WorkspaceMenuItem[] = [
   { key: 'consult', label: '智能问诊', description: '证据约束会话', index: '01' },
   { key: 'atlas', label: '健康可视化', description: '人体系统图谱', index: '02' },
-  { key: 'research', label: '证据检索', description: '独立混合召回', index: '03' },
-  { key: 'knowledge', label: '知识资产', description: '语料与权限', index: '04' },
-  { key: 'monitor', label: '运行监测', description: '模型与索引', index: '05' },
+  { key: 'records', label: '报告解读', description: '病历与检查资料', index: '03' },
+  { key: 'research', label: '证据检索', description: '独立混合召回', index: '04' },
+  { key: 'knowledge', label: '知识资产', description: '语料与权限', index: '05' },
+  { key: 'monitor', label: '运行监测', description: '模型与索引', index: '06' },
 ]
 
 const activeWorkspace = ref<WorkspaceKey>('consult')
@@ -210,6 +212,7 @@ onMounted(loadWorkspaceData)
           :atlas="atlas"
           @start-consult="startConsultFromAtlas"
         />
+        <MedicalRecordWorkspace v-else-if="activeWorkspace === 'records'" />
         <EvidenceSearch v-else-if="activeWorkspace === 'research'" />
         <KnowledgeWorkspace
           v-else-if="activeWorkspace === 'knowledge'"

@@ -36,6 +36,8 @@ const failedSystemIds = ref<AnatomySystemId[]>([])
 let controller: AnatomySceneController | null = null
 let resizeObserver: ResizeObserver | null = null
 let isDisposed = false
+let pendingStructureName = ''
+let pendingStructureAliases: string[] = []
 
 /**
  * 将三维场景点击的系统标识传递给人体图谱页面。
@@ -120,6 +122,14 @@ async function initializeScene() {
     controller = nextController
     controller.setSelectedStructures(props.selectedStructureNames)
     controller.setAutoRotate(props.autoRotate)
+    if (pendingStructureName) {
+      controller.focusStructure(pendingStructureName)
+      pendingStructureName = ''
+    }
+    if (pendingStructureAliases.length) {
+      controller.focusStructureAliases(pendingStructureAliases)
+      pendingStructureAliases = []
+    }
     resizeObserver = new ResizeObserver(handleResize)
     resizeObserver.observe(containerRef.value)
     isReady.value = true
@@ -206,7 +216,23 @@ function resetView() {
  * @param rawName 三维模型中的原始结构名称
  */
 function focusStructure(rawName: string) {
-  controller?.focusStructure(rawName)
+  if (controller) {
+    controller.focusStructure(rawName)
+    return
+  }
+  pendingStructureName = rawName
+}
+
+/**
+ * 将三维镜头定位到符合一组医学别名的结构集合。
+ * @param aliases 科室或器官配置的英文模型别名
+ */
+function focusStructureAliases(aliases: string[]) {
+  if (controller) {
+    controller.focusStructureAliases(aliases)
+    return
+  }
+  pendingStructureAliases = [...aliases]
 }
 
 /**
@@ -235,7 +261,12 @@ watch(getAutoRotate, syncAutoRotate)
 onMounted(initializeScene)
 onBeforeUnmount(disposeScene)
 
-defineExpose<AnatomySceneExposed>({ resetView, focusStructure, setAutoRotate })
+defineExpose<AnatomySceneExposed>({
+  resetView,
+  focusStructure,
+  focusStructureAliases,
+  setAutoRotate,
+})
 </script>
 
 <template>

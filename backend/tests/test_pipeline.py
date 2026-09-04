@@ -309,6 +309,24 @@ class AtlasTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(atlas.systems), 6)
         self.assertTrue(any(system.id == "circulatory" for system in atlas.systems))
+        self.assertGreaterEqual(len(atlas.departments), 45)
+        stomatology = next(
+            department
+            for department in atlas.departments
+            if department.id == "stomatology"
+        )
+        self.assertEqual(stomatology.official_code, "12")
+        digestive = next(system for system in atlas.systems if system.id == "digestive")
+        self.assertTrue(any(organ.id == "upper-anterior-teeth" for organ in digestive.organs))
+        anorectal = next(organ for organ in digestive.organs if organ.id == "anorectal")
+        self.assertIn("colorectal-surgery", anorectal.department_ids)
+        self.assertTrue(
+            any(option.id == "bleeding" for option in anorectal.symptom_options)
+        )
+        perianal = next(
+            region for region in atlas.body_regions if region.id == "perianal-region"
+        )
+        self.assertIn("tcm-anorectal", perianal.department_ids)
         self.assertIn("不构成诊断", atlas.disclaimer)
 
 

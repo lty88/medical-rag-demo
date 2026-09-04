@@ -81,7 +81,7 @@ export interface ScenarioPreset {
   value: Partial<ConsultationFormState>
 }
 
-export type WorkspaceKey = 'consult' | 'atlas' | 'research' | 'knowledge' | 'monitor'
+export type WorkspaceKey = 'consult' | 'atlas' | 'records' | 'research' | 'knowledge' | 'monitor'
 
 export interface WorkspaceMenuItem {
   key: WorkspaceKey
@@ -120,6 +120,53 @@ export interface ResearchSearchResponse {
   duration_ms: number
 }
 
+export type MedicalDocumentType =
+  | 'outpatient_record'
+  | 'discharge_record'
+  | 'laboratory_report'
+  | 'ultrasound_report'
+  | 'imaging_report'
+  | 'pathology_report'
+  | 'other'
+
+export interface MedicalDocumentFinding {
+  name: string
+  original_text: string
+  explanation: string
+  level: 'normal' | 'attention' | 'urgent' | 'uncertain'
+}
+
+export interface MedicalDocumentEvidence {
+  marker: string
+  title: string
+  excerpt: string
+  source: string
+  source_type: string
+  trust_level: string
+  source_url: string | null
+}
+
+export interface MedicalDocumentInterpretationResponse {
+  request_id: string
+  file_name: string
+  document_type: string
+  extraction_mode: 'text' | 'vision'
+  title: string
+  summary: string
+  urgency: 'routine' | 'attention' | 'urgent' | 'insufficient'
+  findings: MedicalDocumentFinding[]
+  sections: AnswerSection[]
+  red_flags: string[]
+  questions_for_doctor: string[]
+  limitations: string[]
+  evidence: MedicalDocumentEvidence[]
+  retrieval_mode: string
+  generation_model: string
+  privacy_notice: string
+  disclaimer: string
+  duration_ms: number
+}
+
 export interface AtlasOrgan {
   id: string
   name: string
@@ -128,12 +175,14 @@ export interface AtlasOrgan {
   mesh_aliases: string[]
   symptom_options: AtlasSymptomOption[]
   available_models: AnatomyModelId[]
+  department_ids: string[]
 }
 
 export interface AtlasSymptomOption {
   id: string
   label: string
   query_text: string
+  department_ids: string[]
 }
 
 export interface AtlasBodyRegion {
@@ -147,6 +196,21 @@ export interface AtlasBodyRegion {
   summary: string
   mesh_aliases: string[]
   symptom_options: AtlasSymptomOption[]
+  department_ids: string[]
+}
+
+export interface AtlasDepartment {
+  id: string
+  official_code: string
+  name: string
+  english_name: string
+  group: string
+  summary: string
+  common_reasons: string[]
+  target_system_id: string
+  target_organ_id: string | null
+  focus_aliases: string[]
+  preferred_model: AnatomyModelId | null
 }
 
 export interface AtlasComplaintSelection {
@@ -155,6 +219,7 @@ export interface AtlasComplaintSelection {
   structure_label: string
   symptoms: AtlasSymptomOption[]
   description: string
+  department_ids: string[]
 }
 
 export interface AtlasSystem {
@@ -188,12 +253,14 @@ export interface AtlasConsultContext {
   organ_summary: string
   observation: string
   complaints: AtlasComplaintSelection[]
+  suggested_departments: string[]
 }
 
 export interface BodyAtlasResponse {
   title: string
   description: string
   systems: AtlasSystem[]
+  departments: AtlasDepartment[]
   body_regions: AtlasBodyRegion[]
   models: AtlasModelProfile[]
   default_model: AnatomyModelId

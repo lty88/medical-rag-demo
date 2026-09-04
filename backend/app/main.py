@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.models import (
@@ -14,14 +17,21 @@ from app.models import (
     ConsultationRequest,
     ConsultationResponse,
     KnowledgeStats,
+    MedicalDocumentInterpretationResponse,
     ResearchSearchRequest,
     ResearchSearchResponse,
 )
 from app.pipeline import MedicalRagPipeline
 from app.services.atlas import build_body_atlas
+from app.services.document_interpreter import (
+    DocumentInterpretationError,
+    MedicalDocumentInterpreter,
+    create_document_request_id,
+)
 
 
 pipeline = MedicalRagPipeline(settings)
+document_interpreter = MedicalDocumentInterpreter(settings)
 
 
 @asynccontextmanager
@@ -102,6 +112,86 @@ def research_search(request: ResearchSearchRequest) -> ResearchSearchResponse:
     """
 
     return pipeline.search_research_evidence(request)
+
+
+@app.post(
+    "/api/documents/interpret",
+    response_model=MedicalDocumentInterpretationResponse,
+)
+async def interpret_medical_document(
+    file: UploadFile = File(...),
+    document_type: Literal[
+        "outpatient_record",
+        "discharge_record",
+        "laboratory_report",
+        "ultrasound_report",
+        "imaging_report",
+        "pathology_report",
+        "other",
+    ] = Form(...),
+    symptom_description: str = Form(default="", max_length=2000),
+    interpretation_focus: str = Form(default="", max_length=300),
+    sensitive_data_consent: bool = Form(...),
+) -> MedicalDocumentInterpretationResponse:
+    """接收单份医疗资料并执行提取、本地检索和受限模型解读。
+
+    Args:
+        file: PDF、文本或报告截图，文件只在本次请求内存中处理。
+        document_type: 用户选择的病历或检查报告类型。
+        symptom_description: 用户选填的症状、持续时间和就诊背景。
+        interpretation_focus: 用户最希望了解的报告内容。
+        sensitive_data_consent: 用户是否单独同意处理敏感医疗信息。
+
+    Returns:
+        关键发现、通俗解释、风险提示、就医提问和本地证据。
+
+    Raises:
+        HTTPException: 未同意敏感信息处理、文件超限或模型服务失败时抛出。
+    """
+
+    if not sensitive_data_consent:
+        raise HTTPException(
+            status_code=400,
+            detail="医疗资料属于敏感个人信息，请阅读说明并主动勾选同意后再提交。",
+        )
+    started_at = time.perf_counter()
+    request_id = create_document_request_id()
+    try:
+        data = await file.read(settings.medical_document_max_bytes + 1)
+        document = await run_in_threadpool(
+            document_interpreter.extract,
+            file.filename or "未命名资料",
+            data,
+            document_type,
+            request_id,
+        )
+        retrieval_query = " ".join(
+            item
+            for item in (
+                symptom_description.strip()[:150],
+                interpretation_focus.strip()[:100],
+                document.text[:100],
+                document.text[-150:],
+            )
+            if item
+        )[:500]
+        evidence_response = await run_in_threadpool(
+            pipeline.search_research_evidence,
+            ResearchSearchRequest(query=retrieval_query, top_k=4),
+        )
+        return await run_in_threadpool(
+            document_interpreter.interpret,
+            document,
+            symptom_description,
+            interpretation_focus,
+            evidence_response,
+            request_id,
+            started_at,
+        )
+    except DocumentInterpretationError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.message) from error
+    finally:
+        await file.close()
 
 
 @app.post("/api/consult", response_model=ConsultationResponse)

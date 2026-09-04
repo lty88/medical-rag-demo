@@ -331,7 +331,7 @@ export async function createAnatomyScene(
   const scene = new THREE.Scene()
   scene.fog = new THREE.FogExp2(0x06151f, 0.028)
 
-  const camera = new THREE.PerspectiveCamera(31, 1, 0.1, 100)
+  const camera = new THREE.PerspectiveCamera(31, 1, 0.01, 100)
   camera.position.set(0, 0, 19.4)
 
   const renderer = new THREE.WebGLRenderer({
@@ -353,8 +353,9 @@ export async function createAnatomyScene(
   controls.dampingFactor = 0.065
   controls.enablePan = true
   controls.screenSpacePanning = true
-  controls.minDistance = 3.2
+  controls.minDistance = 0.28
   controls.maxDistance = 28
+  controls.zoomToCursor = true
   controls.minPolarAngle = Math.PI * 0.27
   controls.maxPolarAngle = Math.PI * 0.73
   controls.target.set(0, -0.15, 0)
@@ -544,13 +545,11 @@ export async function createAnatomyScene(
   }
 
   /**
-   * 根据三维对象包围盒计算完整可见距离，并平滑移动相机完成定位放大。
-   * @param targetObject 要聚焦的系统根节点或精细器官网格
+   * 根据三维包围盒计算完整可见距离，并平滑移动相机焦点到局部中心。
+   * @param bounds 一个器官、牙位或一组网格的世界坐标包围盒
    * @param padding 镜头边缘留白倍率，数值越大视野越宽
    */
-  function focusObject(targetObject: THREE.Object3D, padding: number) {
-    anatomyRoot.updateMatrixWorld(true)
-    const bounds = new THREE.Box3().setFromObject(targetObject)
+  function focusBounds(bounds: THREE.Box3, padding: number) {
     const size = bounds.getSize(new THREE.Vector3())
     const center = bounds.getCenter(new THREE.Vector3())
     if (!Number.isFinite(size.y) || size.lengthSq() <= 0) return
@@ -573,6 +572,25 @@ export async function createAnatomyScene(
       fromTarget: controls.target.clone(),
       toTarget: center,
     }
+  }
+
+  /**
+   * 根据三维对象包围盒平滑移动镜头并把观察中心切换到该对象。
+   * @param targetObject 要聚焦的系统根节点或精细器官网格
+   * @param padding 镜头边缘留白倍率，数值越大视野越宽
+   */
+  function focusObject(targetObject: THREE.Object3D, padding: number) {
+    anatomyRoot.updateMatrixWorld(true)
+    focusBounds(new THREE.Box3().setFromObject(targetObject), padding)
+  }
+
+  /**
+   * 统一三维网格名称的大小写、下划线和空格，供科室别名进行模糊匹配。
+   * @param value 模型原始名称或医学结构别名
+   * @returns 可进行包含关系比较的标准化名称
+   */
+  function normalizeMeshLookupName(value: string) {
+    return value.toLowerCase().replace(/[_\.]+/g, ' ').replace(/\s+/g, ' ').trim()
   }
 
   /**
@@ -599,6 +617,33 @@ export async function createAnatomyScene(
         return
       }
     }
+  }
+
+  /**
+   * 聚焦与一组医学别名匹配的全部网格，使科室导航可定位牙列或器官区域。
+   * @param aliases 后端科室或器官配置的模型英文别名
+   */
+  function focusStructureAliases(aliases: string[]) {
+    const normalizedAliases = aliases
+      .map(normalizeMeshLookupName)
+      .filter((alias) => alias.length >= 3)
+    if (!normalizedAliases.length) return
+    anatomyRoot.updateMatrixWorld(true)
+    const bounds = new THREE.Box3()
+    let hasMatch = false
+    for (const layer of loadedLayers.values()) {
+      for (const mesh of layer.meshes) {
+        const rawName = String(mesh.userData.rawName ?? mesh.name)
+        const normalizedName = normalizeMeshLookupName(rawName)
+        const isMatch = normalizedAliases.some(
+          (alias) => normalizedName === alias || normalizedName.includes(alias),
+        )
+        if (!isMatch) continue
+        bounds.expandByObject(mesh)
+        hasMatch = true
+      }
+    }
+    if (hasMatch) focusBounds(bounds, 1.55)
   }
 
   /**
@@ -827,6 +872,7 @@ export async function createAnatomyScene(
     setActiveSystem,
     focusSystem,
     focusStructure,
+    focusStructureAliases,
     setSelectedStructures,
     setAutoRotate,
     resize,

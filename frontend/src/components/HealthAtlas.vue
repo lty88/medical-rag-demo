@@ -1,12 +1,14 @@
 <script setup lang="tsx">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { findAtlasOrgan, findBodyRegion } from '../anatomy/regions'
-import type { AnatomyStructureSelection } from '../anatomy/types'
+import type { AnatomyStructureSelection, BodyMapExposed } from '../anatomy/types'
+import AtlasNavigationPanel from './AtlasNavigationPanel.vue'
 import AtlasRegionInspector from './AtlasRegionInspector.vue'
 import AnatomyModelSwitch from './AnatomyModelSwitch.vue'
 import BodyMap from './BodyMap.vue'
 import type {
   AtlasBodyRegion,
+  AtlasDepartment,
   AnatomyModelId,
   AtlasComplaintSelection,
   AtlasConsultContext,
@@ -22,7 +24,10 @@ const activeSystemId = ref('regional')
 const activeModelId = ref<AnatomyModelId>('male')
 const activeOrganId = ref('')
 const activeRegionId = ref('')
+const activeDepartmentId = ref('')
+const activeComplaintId = ref('')
 const selectedComplaints = ref<AtlasComplaintSelection[]>([])
+const bodyMapRef = ref<BodyMapExposed | null>(null)
 const maximumSelectedRegions = 12
 const systemFocusVersion = ref(0)
 
@@ -57,6 +62,8 @@ const activeRegion = computed(
  */
 function selectSystem(systemId: string) {
   activeSystemId.value = systemId
+  activeDepartmentId.value = ''
+  activeComplaintId.value = ''
   systemFocusVersion.value += 1
   const system = props.atlas?.systems.find((item) => item.id === systemId)
   activeOrganId.value = system?.organs[0]?.id ?? ''
@@ -71,6 +78,8 @@ function selectModel(modelId: AnatomyModelId) {
   activeModelId.value = modelId
   selectedComplaints.value = []
   activeRegionId.value = ''
+  activeDepartmentId.value = ''
+  activeComplaintId.value = ''
   const firstSystemId = props.atlas?.models
     .find((model) => model.id === modelId)
     ?.available_system_ids[0] ?? ''
@@ -86,11 +95,13 @@ function selectOrgan(organId: string) {
   const organ = activeSystem.value?.organs.find((item) => item.id === organId)
   if (organ && activeSystem.value) {
     const complaintId = buildOrganComplaintId(activeSystem.value.id, organ.id)
+    activeComplaintId.value = complaintId
+    bodyMapRef.value?.focusAliases(organ.mesh_aliases)
     if (selectedComplaints.value.some((item) => item.region_id === complaintId)) {
       removeComplaint(complaintId)
     }
     else {
-      addComplaint(complaintId, organ.name, '')
+      addComplaint(complaintId, organ.name, '', organ.department_ids)
     }
   }
 }
@@ -110,8 +121,14 @@ function buildOrganComplaintId(systemId: string, organId: string) {
  * @param regionId 身体部位或器官复合标识
  * @param regionName 面向用户展示的中文名称
  * @param structureLabel 对应的原始三维网格名称
+ * @param departmentIds 与该部位相关的初诊科室标识
  */
-function addComplaint(regionId: string, regionName: string, structureLabel: string) {
+function addComplaint(
+  regionId: string,
+  regionName: string,
+  structureLabel: string,
+  departmentIds: string[],
+) {
   if (selectedComplaints.value.some((item) => item.region_id === regionId)) return
   if (selectedComplaints.value.length >= maximumSelectedRegions) return
   selectedComplaints.value = [
@@ -122,6 +139,7 @@ function addComplaint(regionId: string, regionName: string, structureLabel: stri
       structure_label: structureLabel,
       symptoms: [],
       description: '',
+      department_ids: [...departmentIds],
     },
   ]
 }
@@ -137,11 +155,12 @@ function selectStructure(selection: AnatomyStructureSelection) {
     if (!region) return
     activeSystemId.value = 'regional'
     activeRegionId.value = region.id
+    activeComplaintId.value = region.id
     if (selectedComplaints.value.some((item) => item.region_id === region.id)) {
       removeComplaint(region.id)
       return
     }
-    addComplaint(region.id, region.name, selection.rawName)
+    addComplaint(region.id, region.name, selection.rawName, region.department_ids)
     return
   }
   const system = props.atlas.systems.find((item) => item.id === selection.systemId)
@@ -150,12 +169,13 @@ function selectStructure(selection: AnatomyStructureSelection) {
   if (!organ) return
   activeSystemId.value = system.id
   activeOrganId.value = organ.id
-  const complaintId = buildOrganComplaintId(system.id, organ.id)
+  const complaintId = `structure:${system.id}:${selection.rawName}`
+  activeComplaintId.value = complaintId
   if (selectedComplaints.value.some((item) => item.region_id === complaintId)) {
     removeComplaint(complaintId)
     return
   }
-  addComplaint(complaintId, organ.name, selection.rawName)
+  addComplaint(complaintId, selection.label, selection.rawName, organ.department_ids)
 }
 
 /**
@@ -175,6 +195,7 @@ function toggleRegionSymptom(region: AtlasBodyRegion, symptom: AtlasSymptomOptio
         structure_label: '',
         symptoms: [symptom],
         description: '',
+        department_ids: [...region.department_ids],
       },
     ]
     return
@@ -199,8 +220,10 @@ function toggleRegionSymptom(region: AtlasBodyRegion, symptom: AtlasSymptomOptio
  */
 function toggleOrganSymptom(organ: AtlasOrgan, symptom: AtlasSymptomOption) {
   if (!activeSystem.value) return
-  const complaintId = buildOrganComplaintId(activeSystem.value.id, organ.id)
-  addComplaint(complaintId, organ.name, '')
+  const complaintId = activeComplaintId.value.startsWith(`structure:${activeSystem.value.id}:`)
+    ? activeComplaintId.value
+    : buildOrganComplaintId(activeSystem.value.id, organ.id)
+  addComplaint(complaintId, organ.name, '', organ.department_ids)
   const current = selectedComplaints.value.find((item) => item.region_id === complaintId)
   if (!current) return
   const selected = current.symptoms.some((item) => item.id === symptom.id)
@@ -234,6 +257,7 @@ function updateComplaintDescription(regionId: string, description: string) {
 function removeComplaint(regionId: string) {
   selectedComplaints.value = selectedComplaints.value.filter((item) => item.region_id !== regionId)
   if (activeRegionId.value === regionId) activeRegionId.value = ''
+  if (activeComplaintId.value === regionId) activeComplaintId.value = ''
 }
 
 /**
@@ -241,6 +265,21 @@ function removeComplaint(regionId: string) {
  * @param regionId 要查看的身体区域标识
  */
 function focusComplaint(regionId: string) {
+  const complaint = selectedComplaints.value.find((item) => item.region_id === regionId)
+  activeComplaintId.value = regionId
+  if (complaint?.structure_label) {
+    bodyMapRef.value?.focusStructure(complaint.structure_label)
+  }
+  if (regionId.startsWith('structure:')) {
+    const [, systemId] = regionId.split(':')
+    activeSystemId.value = systemId ?? activeSystemId.value
+    const system = props.atlas?.systems.find((item) => item.id === systemId)
+    const organ = complaint?.structure_label
+      ? findAtlasOrgan(complaint.structure_label, system?.organs ?? [])
+      : null
+    activeOrganId.value = organ?.id ?? system?.organs[0]?.id ?? ''
+    return
+  }
   if (regionId.startsWith('organ:')) {
     const [, systemId, organId] = regionId.split(':')
     activeSystemId.value = systemId ?? activeSystemId.value
@@ -249,6 +288,39 @@ function focusComplaint(regionId: string) {
   }
   activeSystemId.value = 'regional'
   activeRegionId.value = regionId
+}
+
+/**
+ * 根据初诊科室切换适配的模型和解剖层，并把镜头移动到相关局部结构。
+ * @param department 用户在科室导航中选择的初诊科室
+ * @returns 模型切换和视图更新完成后的异步结果
+ */
+async function selectDepartment(department: AtlasDepartment): Promise<void> {
+  const currentModelSupportsTarget = activeModel.value?.available_system_ids.includes(
+    department.target_system_id,
+  ) ?? false
+  const fallbackModel = props.atlas?.models.find(
+    (model) => model.available_system_ids.includes(department.target_system_id),
+  )?.id
+  const targetModel = department.preferred_model
+    ?? (currentModelSupportsTarget ? activeModelId.value : fallbackModel)
+  if (targetModel && targetModel !== activeModelId.value) {
+    selectModel(targetModel)
+    await nextTick()
+  }
+  activeDepartmentId.value = department.id
+  activeSystemId.value = department.target_system_id
+  activeRegionId.value = ''
+  activeComplaintId.value = ''
+  const system = props.atlas?.systems.find(
+    (item) => item.id === department.target_system_id,
+  )
+  activeOrganId.value = department.target_organ_id ?? system?.organs[0]?.id ?? ''
+  systemFocusVersion.value += 1
+  await nextTick()
+  window.requestAnimationFrame(() => {
+    bodyMapRef.value?.focusAliases(department.focus_aliases)
+  })
 }
 
 /**
@@ -261,6 +333,18 @@ function startConsult() {
   const focusedName = isRegional
     ? activeRegion.value?.name ?? '身体部位'
     : activeOrgan.value?.name ?? activeSystem.value.name
+  const selectedDepartmentIds = new Set(
+    selectedComplaints.value.flatMap((item) => [
+      ...item.department_ids,
+      ...item.symptoms.flatMap((symptom) => symptom.department_ids),
+    ]),
+  )
+  if (activeDepartmentId.value) selectedDepartmentIds.add(activeDepartmentId.value)
+  const suggestedDepartments = [...selectedDepartmentIds]
+    .map((departmentId) => props.atlas?.departments.find(
+      (department) => department.id === departmentId,
+    )?.name)
+    .filter((name): name is string => Boolean(name))
   emit('startConsult', {
     anatomy_model: activeModelId.value,
     system_id: activeSystem.value.id,
@@ -281,6 +365,7 @@ function startConsult() {
       ...item,
       symptoms: item.symptoms.map((symptom) => ({ ...symptom })),
     })),
+    suggested_departments: suggestedDepartments,
   })
 }
 
@@ -314,28 +399,19 @@ watch(
     </header>
 
     <div v-if="atlas" class="atlas-layout">
-      <aside class="atlas-system-list">
-        <p>SYSTEM LAYERS</p>
-        <button
-          v-for="system in visibleSystems"
-          :key="system.id"
-          type="button"
-          :class="{ active: activeSystemId === system.id }"
-          :style="{ '--system-color': system.color }"
-          @click="selectSystem(system.id)"
-        >
-          <i />
-          <span><strong>{{ system.name }}</strong><small>{{ system.english_name }}</small></span>
-          <b>↗</b>
-        </button>
-        <div class="atlas-boundary">
-          <span>SAFETY BOUNDARY</span>
-          <p>{{ atlas.disclaimer }}</p>
-        </div>
-      </aside>
+      <AtlasNavigationPanel
+        :systems="visibleSystems"
+        :departments="atlas.departments"
+        :active-system-id="activeSystemId"
+        :active-department-id="activeDepartmentId"
+        :disclaimer="atlas.disclaimer"
+        @select-system="selectSystem"
+        @select-department="selectDepartment"
+      />
 
       <BodyMap
         v-if="activeModel"
+        ref="bodyMapRef"
         :systems="visibleSystems"
         :model-id="activeModelId"
         :model-name="activeModel.name"
@@ -354,6 +430,8 @@ watch(
         :active-system="activeSystem"
         :active-organ="activeOrgan"
         :active-region="activeRegion"
+        :active-complaint-id="activeComplaintId"
+        :departments="atlas.departments"
         :selected-complaints="selectedComplaints"
         @select-organ="selectOrgan"
         @toggle-symptom="toggleRegionSymptom"

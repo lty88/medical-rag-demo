@@ -86,11 +86,17 @@ class Settings:
     llm_base_url: str | None = os.getenv("LLM_BASE_URL") or None
     llm_api_key: str | None = os.getenv("LLM_API_KEY") or None
     llm_model: str | None = os.getenv("LLM_MODEL") or None
+    llm_vision_model: str | None = (
+        os.getenv("LLM_VISION_MODEL") or os.getenv("LLM_MODEL") or None
+    )
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
     llm_evidence_max_characters: int = int(
         os.getenv("LLM_EVIDENCE_MAX_CHARACTERS", "2500")
     )
     llm_max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1200"))
+    medical_document_max_output_tokens: int = int(
+        os.getenv("MEDICAL_DOCUMENT_MAX_OUTPUT_TOKENS", "2400")
+    )
     llm_enable_thinking: bool | None = (
         os.getenv("LLM_ENABLE_THINKING", "").strip().lower()
         in {"1", "true", "yes", "on"}
@@ -100,6 +106,15 @@ class Settings:
     retrieval_log_top_k: int = int(os.getenv("RETRIEVAL_LOG_TOP_K", "10"))
     retrieval_log_content_characters: int = int(
         os.getenv("RETRIEVAL_LOG_CONTENT_CHARACTERS", "300")
+    )
+    medical_document_max_bytes: int = int(
+        os.getenv("MEDICAL_DOCUMENT_MAX_BYTES", str(12 * 1024 * 1024))
+    )
+    medical_document_max_characters: int = int(
+        os.getenv("MEDICAL_DOCUMENT_MAX_CHARACTERS", "30000")
+    )
+    medical_document_max_pdf_pages: int = int(
+        os.getenv("MEDICAL_DOCUMENT_MAX_PDF_PAGES", "20")
     )
     cors_origins: tuple[str, ...] = parse_cors_origins(os.getenv("CORS_ORIGINS"))
 

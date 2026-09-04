@@ -13,6 +13,7 @@ class ConsultationVisualSymptom(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     label: str = Field(min_length=1, max_length=100)
     query_text: str = Field(min_length=1, max_length=200)
+    department_ids: list[str] = Field(default_factory=list, max_length=12)
 
 
 class ConsultationVisualComplaint(BaseModel):
@@ -26,6 +27,7 @@ class ConsultationVisualComplaint(BaseModel):
         default_factory=list,
         max_length=12,
     )
+    department_ids: list[str] = Field(default_factory=list, max_length=12)
 
 
 class ConsultationVisualContext(BaseModel):
@@ -43,6 +45,7 @@ class ConsultationVisualContext(BaseModel):
         default_factory=list,
         max_length=20,
     )
+    suggested_departments: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ConsultationRequest(BaseModel):
@@ -234,12 +237,57 @@ class ResearchSearchResponse(BaseModel):
     duration_ms: int
 
 
+class MedicalDocumentFinding(BaseModel):
+    """病历或检查报告中一项可追溯的关键发现。"""
+
+    name: str = Field(min_length=1, max_length=120)
+    original_text: str = Field(default="", max_length=1000)
+    explanation: str = Field(min_length=1, max_length=2000)
+    level: Literal["normal", "attention", "urgent", "uncertain"] = "uncertain"
+
+
+class MedicalDocumentEvidence(BaseModel):
+    """病历解读过程中用于辅助解释的一条本地检索证据。"""
+
+    marker: str
+    title: str
+    excerpt: str
+    source: str
+    source_type: str
+    trust_level: str
+    source_url: str | None
+
+
+class MedicalDocumentInterpretationResponse(BaseModel):
+    """上传病历或检查报告后的结构化辅助解读结果。"""
+
+    request_id: str
+    file_name: str
+    document_type: str
+    extraction_mode: Literal["text", "vision"]
+    title: str
+    summary: str
+    urgency: Literal["routine", "attention", "urgent", "insufficient"]
+    findings: list[MedicalDocumentFinding]
+    sections: list[AnswerSection]
+    red_flags: list[str]
+    questions_for_doctor: list[str]
+    limitations: list[str]
+    evidence: list[MedicalDocumentEvidence]
+    retrieval_mode: str
+    generation_model: str
+    privacy_notice: str
+    disclaimer: str
+    duration_ms: int
+
+
 class AtlasSymptomOption(BaseModel):
     """身体部位可供普通用户勾选的通俗症状表现。"""
 
     id: str
     label: str
     query_text: str
+    department_ids: list[str] = Field(default_factory=list)
 
 
 class AtlasOrgan(BaseModel):
@@ -254,6 +302,7 @@ class AtlasOrgan(BaseModel):
     available_models: list[Literal["male", "female"]] = Field(
         default_factory=lambda: ["male", "female"]
     )
+    department_ids: list[str] = Field(default_factory=list)
 
 
 class AtlasBodyRegion(BaseModel):
@@ -269,6 +318,23 @@ class AtlasBodyRegion(BaseModel):
     summary: str
     mesh_aliases: list[str]
     symptom_options: list[AtlasSymptomOption]
+    department_ids: list[str] = Field(default_factory=list)
+
+
+class AtlasDepartment(BaseModel):
+    """面向普通用户的医院初诊科室导航数据。"""
+
+    id: str
+    official_code: str
+    name: str
+    english_name: str
+    group: str
+    summary: str
+    common_reasons: list[str]
+    target_system_id: str
+    target_organ_id: str | None = None
+    focus_aliases: list[str] = Field(default_factory=list)
+    preferred_model: Literal["male", "female"] | None = None
 
 
 class AtlasSystem(BaseModel):
@@ -303,6 +369,7 @@ class BodyAtlasResponse(BaseModel):
     title: str
     description: str
     systems: list[AtlasSystem]
+    departments: list[AtlasDepartment]
     body_regions: list[AtlasBodyRegion]
     models: list[AtlasModelProfile]
     default_model: Literal["male", "female"] = "male"

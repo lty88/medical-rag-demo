@@ -1,6 +1,7 @@
 <script setup lang="tsx">
 import { defineAsyncComponent, ref } from 'vue'
 import type {
+  BodyMapExposed,
   AnatomyModelId,
   AnatomySceneExposed,
   AnatomyStructureSelection,
@@ -91,6 +92,24 @@ function focusSelectedStructure() {
   const rawName = [...props.selectedStructureNames].reverse().find(Boolean)
   if (rawName) sceneRef.value?.focusStructure(rawName)
 }
+
+/**
+ * 将镜头定位到一个已知的原始三维网格。
+ * @param rawName 三维模型节点的原始名称
+ */
+function focusStructure(rawName: string) {
+  sceneRef.value?.focusStructure(rawName)
+}
+
+/**
+ * 将镜头定位到与医学别名匹配的一组器官或牙位结构。
+ * @param aliases 器官或科室配置的模型英文别名
+ */
+function focusAliases(aliases: string[]) {
+  sceneRef.value?.focusStructureAliases(aliases)
+}
+
+defineExpose<BodyMapExposed>({ focusStructure, focusAliases })
 </script>
 
 <template>
@@ -140,7 +159,7 @@ function focusSelectedStructure() {
     <div class="anatomy-interaction-hint">
       <span>左键旋转</span><i />
       <span>右键拖动</span><i />
-      <span>滚轮缩放</span><i />
+      <span>指向部位滚轮缩放</span><i />
       <span>双击局部放大</span>
     </div>
 

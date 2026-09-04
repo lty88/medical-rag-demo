@@ -1,7 +1,9 @@
 <script setup lang="tsx">
+import { computed } from 'vue'
 import type {
   AtlasBodyRegion,
   AtlasComplaintSelection,
+  AtlasDepartment,
   AtlasOrgan,
   AtlasSymptomOption,
   AtlasSystem,
@@ -11,6 +13,8 @@ const props = defineProps<{
   activeSystem: AtlasSystem
   activeOrgan: AtlasOrgan | null
   activeRegion: AtlasBodyRegion | null
+  activeComplaintId: string
+  departments: AtlasDepartment[]
   selectedComplaints: AtlasComplaintSelection[]
 }>()
 
@@ -23,6 +27,24 @@ const emit = defineEmits<{
   focusComplaint: [regionId: string]
   startConsult: []
 }>()
+
+const recommendedDepartments = computed(() => {
+  const baseDepartmentIds = props.activeRegion?.department_ids
+    ?? props.activeOrgan?.department_ids
+    ?? []
+  const activeComplaint = props.selectedComplaints.find(
+    (complaint) => complaint.region_id === props.activeComplaintId,
+  )
+  const symptomDepartmentIds = activeComplaint?.symptoms.flatMap(
+    (symptom) => symptom.department_ids,
+  ) ?? []
+  const departmentIds = new Set([...baseDepartmentIds, ...symptomDepartmentIds])
+  return [...departmentIds]
+    .map((departmentId) => props.departments.find(
+      (department) => department.id === departmentId,
+    ))
+    .filter((department): department is AtlasDepartment => Boolean(department))
+})
 
 /**
  * 判断当前身体区域是否已经勾选某个症状表现。
@@ -53,6 +75,18 @@ function isComplaintSelected(complaintId: string) {
  */
 function buildOrganComplaintId(systemId: string, organId: string) {
   return `organ:${systemId}:${organId}`
+}
+
+/**
+ * 解析当前器官症状应写入的精确结构或器官级症状卡片标识。
+ * @param systemId 当前器官所属系统标识
+ * @param organId 当前器官标识
+ * @returns 精确网格已激活时返回结构标识，否则返回器官复合标识
+ */
+function resolveActiveOrganComplaintId(systemId: string, organId: string) {
+  return props.activeComplaintId.startsWith(`structure:${systemId}:`)
+    ? props.activeComplaintId
+    : buildOrganComplaintId(systemId, organId)
 }
 
 /**
@@ -157,18 +191,18 @@ function hasComplaintDetail(complaint: AtlasComplaintSelection) {
           type="button"
           :class="{
             active: isSymptomSelected(
-              buildOrganComplaintId(activeSystem.id, activeOrgan.id),
+              resolveActiveOrganComplaintId(activeSystem.id, activeOrgan.id),
               symptom.id,
             ),
           }"
           :aria-pressed="isSymptomSelected(
-            buildOrganComplaintId(activeSystem.id, activeOrgan.id),
+            resolveActiveOrganComplaintId(activeSystem.id, activeOrgan.id),
             symptom.id,
           )"
           @click="emit('toggleOrganSymptom', activeOrgan, symptom)"
         >
           <i>{{ isSymptomSelected(
-            buildOrganComplaintId(activeSystem.id, activeOrgan.id),
+            resolveActiveOrganComplaintId(activeSystem.id, activeOrgan.id),
             symptom.id,
           ) ? '✓' : '+' }}</i>
           {{ symptom.label }}
@@ -183,6 +217,21 @@ function hasComplaintDetail(complaint: AtlasComplaintSelection) {
         </dl>
       </section>
     </template>
+
+    <section v-if="recommendedDepartments.length" class="department-guidance-card">
+      <header>
+        <span>初诊科室参考</span>
+        <small>以就诊医院实际设置为准</small>
+      </header>
+      <div>
+        <article v-for="(department, index) in recommendedDepartments" :key="department.id">
+          <b>{{ department.name }} <em>{{ index === 0 ? '优先参考' : '备选' }}</em></b>
+          <span>{{ department.summary }}</span>
+          <small>常见：{{ department.common_reasons.slice(0, 2).join('、') }}</small>
+        </article>
+      </div>
+      <p>这是按部位提供的初诊导航，不是诊断；儿童、孕期和急症仍需结合实际情况分流。</p>
+    </section>
 
     <section class="selected-region-list persistent-selection-list">
       <header>

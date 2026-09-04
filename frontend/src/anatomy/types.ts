@@ -41,6 +41,7 @@ export interface AnatomySceneController {
   setActiveSystem: (systemId: string) => void
   focusSystem: (systemId: string) => void
   focusStructure: (rawName: string) => void
+  focusStructureAliases: (aliases: string[]) => void
   setSelectedStructures: (rawNames: string[]) => void
   setAutoRotate: (enabled: boolean) => void
   resize: () => void
@@ -51,5 +52,11 @@ export interface AnatomySceneController {
 export interface AnatomySceneExposed {
   resetView: () => void
   focusStructure: (rawName: string) => void
+  focusStructureAliases: (aliases: string[]) => void
   setAutoRotate: (enabled: boolean) => void
+}
+
+export interface BodyMapExposed {
+  focusStructure: (rawName: string) => void
+  focusAliases: (aliases: string[]) => void
 }

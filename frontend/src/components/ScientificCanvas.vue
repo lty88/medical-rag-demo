@@ -33,6 +33,7 @@ let reduceMotion = false
 const palettes: Record<WorkspaceKey, CanvasPalette> = {
   consult: { primary: '117, 225, 209', secondary: '125, 211, 252', glow: '94, 234, 212' },
   atlas: { primary: '94, 234, 212', secondary: '251, 113, 133', glow: '125, 211, 252' },
+  records: { primary: '103, 232, 249', secondary: '94, 234, 212', glow: '251, 191, 36' },
   research: { primary: '125, 211, 252', secondary: '167, 139, 250', glow: '117, 225, 209' },
   knowledge: { primary: '251, 191, 36', secondary: '117, 225, 209', glow: '125, 211, 252' },
   monitor: { primary: '117, 225, 209', secondary: '251, 113, 133', glow: '251, 191, 36' },
@@ -229,6 +230,7 @@ function drawDataReadouts(time: number, palette: CanvasPalette) {
   const labels: Record<WorkspaceKey, string[]> = {
     consult: ['TRIAGE  ACTIVE', 'RAG  HYBRID', 'CITATION  VERIFY'],
     atlas: ['SYSTEM  MAP', 'ORGAN  LAYER', 'ANATOMY  EDU'],
+    records: ['DOCUMENT  PARSE', 'VISION  TRANSCRIBE', 'CLINICAL  EXPLAIN'],
     research: ['BM25  100', 'FAISS  100', 'RERANK  040'],
     knowledge: ['PROVENANCE', 'VERSION  CTRL', 'POLICY  DENY'],
     monitor: ['INDEX  READY', 'MODEL  ONLINE', 'SAFETY  10/10'],
