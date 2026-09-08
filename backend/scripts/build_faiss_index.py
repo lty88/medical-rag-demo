@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
+
         default="ming0302/bge-m3-medical-cn",
         help="中文医疗 Embedding 模型名称或本地目录。",
     )
@@ -63,7 +64,7 @@ def parse_args() -> argparse.Namespace:
         "--cache-dir",
         type=Path,
         default=BACKEND_DIR / "data" / "models",
-        help="Hugging Face 模型权重缓存目录。",
+        help="Hugging Face 模型权重缓存目录。", 
     )
     parser.add_argument(
         "--model-subfolder",
@@ -122,7 +123,7 @@ def utc_now() -> str:
     """生成当前 UTC 时间文本。
 
     Returns:
-        ISO 8601 格式的 UTC 时间。
+        ISO 8601 格式的 UTC 时间。 
     """
 
     return datetime.now(timezone.utc).isoformat()
