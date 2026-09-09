@@ -1,6 +1,82 @@
-# 中文医疗混合检索与安全 RAG 系统
+# 中文医疗 LangChain / LangGraph RAG 系统
 
 本项目是一个面向中文医疗问答的完整学习项目，覆盖数据拉取、数据标准化、百万级关键词索引、全量语义向量索引、混合召回、医疗精排、人群过滤、证据约束生成和生成后安全校验。
+
+## 当前技术栈：LangChain v1 生态
+
+2026-09-08 本地迁移验证版本：LangChain **1.4.0**、langchain-core **1.6.2**、langchain-openai **1.6.0**、LangGraph **1.2.11**。具体依赖固定在 `backend/requirements-langchain.txt`；这些是本次安装解析到的稳定版本，后续更新应重新验证后再改版本。
+
+| 原实现 | 当前实现 | 业务作用 |
+|---|---|---|
+| 单个 Python 方法串联问诊 | LangGraph `StateGraph` + 请求级 `TypedDict` | 显式节点、急症条件分支、最终校验 |
+| 两套 urllib 模型客户端 | LangChain `init_chat_model` → `ChatOpenAI` | 统一文本、报告图片转录及兼容服务配置 |
+| 手工拼装模型消息 | `SystemMessage` / `HumanMessage` + `ChatPromptTemplate` | LCEL 提示词与模型组合，保留多模态内容块 |
+| 直接调用索引对象 | 自定义 `BaseRetriever` → 标准 `Document` | 复用本地 BM25 / FAISS，保留来源、权限与分数 |
+| 直接调用医疗精排 | `RunnableLambda` 封装医疗 Reranker | 可组合的精排步骤，复用现有隔离模型进程 |
+| 报告接口内部串联检索与生成 | 报告 LangGraph：retrieve → interpret | 提取后资料进入统一工作流 |
+
+### 问诊图的实际执行顺序
+
+```mermaid
+flowchart TD
+    START --> privacy[隐私脱敏]
+    privacy --> triage[急症规则]
+    triage -->|命中| emergency[返回急症提示]
+    emergency --> END
+    triage -->|未命中| structure[症状与人体图谱上下文]
+    structure --> retrieve[LangChain BM25 / FAISS Retriever]
+    retrieve --> fusion[RRF 去重混排]
+    fusion --> rerank[Runnable 医疗精排]
+    rerank --> filter[年龄 / 孕期 / 地区 / 版本过滤]
+    filter --> generate[Prompt + ChatOpenAI]
+    generate --> validate[引用 / 权限 / 数字校验]
+    validate --> respond[成功或拒绝响应]
+    respond --> END
+```
+
+节点在 `backend/app/pipeline.py`，状态定义在 `backend/app/graph_state.py`。`consult()` 现在调用已编译的图；没有隐藏的旧流程分支。图编译只建立执行关系，不训练模型。
+
+检索节点内顺序调用两个独立 Retriever，保持当前 SQLite/模型进程的资源使用方式；“独立召回”不代表并行执行。RRF 与过滤仍用原有领域规则。医疗流程的步骤和分支已知，采用确定性图编排；本次未加入自主工具选择 Agent、多轮记忆或持久化 checkpoint。
+
+### 已有项目如何升级
+
+在项目根目录执行：
+
+```bash
+.venv-full/bin/python -m pip install -r backend/requirements.txt
+pnpm dev:server
+```
+
+先停止旧后端再启动新版本。当前工作环境已安装迁移依赖；其他机器或重新创建的虚拟环境需要执行安装命令。已有前端接口、`knowledge.db`、`medical.faiss`、索引清单及模型缓存可以直接复用，**无需重新下载语料、训练 IVF-PQ 或重算 Embedding**。
+
+保留原有 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`、`LLM_VISION_MODEL`。新增配置：
+
+```dotenv
+# 默认兼容供应商：用提示词约定 JSON，并在本地严格验证完整性。
+LLM_STRUCTURED_METHOD=prompt
+# 供应商明确支持 JSON 模式时可改为 json_mode。
+# 此时使用 ChatOpenAI.with_structured_output(method="json_mode", include_raw=True)。
+```
+
+完整 `/chat/completions` 地址会规范化为 SDK 根地址；`enable_thinking` 使用 `extra_body` 传递；固定使用 Chat Completions 协议。JSON 模式只保证语法层面的结构，不代表医学正确。无论模式如何，长度截断、拒绝响应、非法 JSON 都会被拒绝，再按原业务路径回退或报错，不静默切换模型或重试付费请求。
+
+### 索引、追踪与验证边界
+
+- 自定义 Retriever 适配现有 `IndexIDMap2(IndexIVFPQ)` 和 SQLite rowid，没有迁移到 LangChain 默认内存 docstore，也不加载 pickle 索引。
+- Transformers / PyTorch 的医疗模型、规范化编码规则和 macOS 子进程隔离保留；迁移框架不会自动提升知识库权威性或召回准确率。
+- 问诊图、报告图和共享模型入口禁用 LangSmith 云端追踪，环境中设置追踪开关也不会自动上传这些请求。仍保留原有本地脱敏输入及检索日志；新模型日志只记录请求标识、阶段、模型和结束原因。
+- 没有开启用户病历持久化和对话记忆。上传文件的接收及提取仍在图之前完成，原始图片字节不进入图状态；上传框架可能使用临时文件，不能据此宣称全流程绝对不落盘。
+- 报告解释沿用已有业务约束与字段校验，尚不具备临床验证的影像诊断能力，也未新增与问诊完全相同的生成后医疗校验器。
+- 本次运行 22 项离线局部测试，使用模拟 HTTP 验证真实 LangChain SDK，未发送真实报告或调用付费模型；未启动应用或执行前端构建。
+
+局部回归命令：
+
+```bash
+cd backend
+../.venv-full/bin/python -m unittest tests.test_langchain_migration tests.test_pipeline -v
+```
+
+官方接口依据：[LangChain v1 迁移指南](https://docs.langchain.com/oss/python/migrate/langchain-v1)、[LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、[ChatOpenAI 集成](https://docs.langchain.com/oss/python/integrations/chat/openai)。
 
 项目当前已经完成以下全量索引：
 
@@ -71,7 +147,7 @@ flowchart LR
 - 症状描述为选填，只提供上下文，不得覆盖或篡改报告结论；
 - 图片识别不到文字时直接失败，不依据单张原始影像猜测诊断；
 - 不生成处方、剂量、停药或替代医生的治疗决定；
-- 文件只在单次请求内存中处理，应用不落盘，日志不记录文件正文；
+- 业务代码不主动持久保存报告，上传框架可能使用临时文件；模型日志不记录文件正文；
 - 图片中的姓名、条码和二维码无法在发送给视觉模型前可靠自动遮盖，用户必须先手动处理。
 
 人体系统图谱使用 Three.js、GLTFLoader 和本地 Draco 解码器渲染真实分层 GLB 解剖模型，支持拖拽旋转、滚轮缩放、器官拾取、系统高亮和相机复位。模型共包含外形、循环、消化、神经、泌尿、呼吸和骨骼七层；WebGL 初始化或模型加载失败时，会自动回退到二维人体图。Three.js 场景按需加载，不会进入普通问诊页面的首屏代码。
@@ -374,13 +450,15 @@ Reranker 只处理 RRF 的少量候选，不会在每次查询时读取全部115
 |---|---|---|
 | 前端 | Vue 3、TypeScript、TSX、Vite | 咨询表单、检索流程轨迹、证据和结果展示 |
 | API | FastAPI、Pydantic | 参数校验、接口、生命周期和 CORS |
+| 流程编排 | LangGraph StateGraph | 请求状态、条件分支、独立处理节点 |
+| 检索协议 | LangChain BaseRetriever / Document | 统一源文档与检索调用 |
 | 原文存储 | SQLite | 保存115万条问题、回答、来源和安全元数据 |
 | 关键词检索 | SQLite FTS5、BM25 | 全量精确召回 |
 | 文本向量化 | Transformers、PyTorch、医疗 BGE | 生成1024维归一化稠密向量 |
 | 向量检索 | FAISS IVF-PQ | 全量语义召回与压缩索引 |
 | 混排 | RRF | 合并两个不可直接比较的排名 |
-| 精排 | BGE Reranker Cross-Encoder | 对有限候选执行深度相关性判断 |
-| 生成 | 证据模板、可选 OpenAI 兼容接口 | 生成带固定引用的结构化回答 |
+| 精排 | RunnableLambda + BGE Reranker Cross-Encoder | 对有限候选执行深度相关性判断 |
+| 生成 | LangChain ChatOpenAI、ChatPromptTemplate、证据模板 | 文本及多模态模型调用，生成带固定引用的结构化回答 |
 | 安全 | 显式规则与校验器 | 急症阻断、人群过滤、治疗权限和幻觉检查 |
 
 ### 6.1 macOS 模型进程隔离
@@ -403,7 +481,8 @@ medical-rag-demo/
 │   │   ├── main.py                       FastAPI 入口
 │   │   ├── config.py                     环境变量配置
 │   │   ├── models.py                     API 和检索数据模型
-│   │   ├── pipeline.py                   完整在线主流程
+│   │   ├── pipeline.py                   LangGraph 问诊图与独立检索
+│   │   ├── graph_state.py                问诊图的请求级状态
 │   │   └── services/
 │   │       ├── privacy.py                隐私脱敏
 │   │       ├── triage.py                 急症危险信号
@@ -416,6 +495,9 @@ medical-rag-demo/
 │   │       ├── reranker.py               Cross-Encoder 精排
 │   │       ├── filters.py                人群与版本过滤
 │   │       ├── generator.py              证据约束生成
+│   │       ├── langchain_chat.py         统一模型调用和完整 JSON 验证
+│   │       ├── langchain_retrieval.py    BM25 / FAISS Retriever 适配
+│   │       ├── document_graph.py         报告检索与解释图
 │   │       ├── validator.py              生成后校验
 │   │       └── model_workers.py           MPS/Torch 模型进程隔离
 │   ├── scripts/
@@ -631,6 +713,7 @@ cp backend/.env.example backend/.env
 | `LLM_TIMEOUT_SECONDS` | `180` | 单次生成请求超时秒数 |
 | `LLM_EVIDENCE_MAX_CHARACTERS` | `2500` | 每条最终证据发送给 LLM 的最大字符数 |
 | `LLM_MAX_OUTPUT_TOKENS` | `1200` | 单次结构化回答最大输出 Token 数 |
+| `LLM_STRUCTURED_METHOD` | `prompt` | prompt 兼容输出或 json_mode 服务端 JSON 输出 |
 | `MEDICAL_DOCUMENT_MAX_OUTPUT_TOKENS` | `2400` | 报告转录与结构化解读最大输出 Token 数 |
 | `LLM_ENABLE_THINKING` | 空 | 支持思考开关的接口可设为 `false`，其他接口留空 |
 | `RETRIEVAL_LOG_TOP_K` | `10` | 每个检索阶段打印的最大候选数量 |
@@ -672,11 +755,11 @@ HF_HUB_OFFLINE=1 MODEL_DEVICE=mps PYTHONPATH=backend \
 [检索结果][RRF] {"request_id":"...","total":40,"candidates":[...]}
 [检索结果][Reranker] {"request_id":"...","total":40,"candidates":[...]}
 [检索结果][最终证据] {"request_id":"...","total":4,"candidates":[...]}
-[LLM请求] {"request_id":"...","url":"...","payload":{...}}
-[LLM响应] {"request_id":"...","model":"...","content":"...","usage":{...}}
+[LLM请求] request_id=... stage=consultation-generation model=... backend=langchain max_tokens=1200
+[LLM响应] request_id=... stage=consultation-generation model=... finish_reason=stop
 ```
 
-用户日志只记录隐私处理后的文本。LLM 请求日志包含实际提示词和证据，但不会记录 `Authorization` 请求头或 `LLM_API_KEY`。生产环境应根据医疗数据合规要求决定是否继续保留这些调试日志。
+用户日志保留原有隐私处理后的文本和检索候选。共享 LangChain 模型日志不再打印完整提示词、图片、响应正文或密钥；格式错误也只返回安全错误类型。每次独立研究检索仍生成自己的 request_id。生产环境应控制本地调试日志访问与保留期限。
 
 ### 10.4 启动前端
 

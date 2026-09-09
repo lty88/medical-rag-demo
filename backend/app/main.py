@@ -23,6 +23,7 @@ from app.models import (
 )
 from app.pipeline import MedicalRagPipeline
 from app.services.atlas import build_body_atlas
+from app.services.document_graph import MedicalDocumentGraph
 from app.services.document_interpreter import (
     DocumentInterpretationError,
     MedicalDocumentInterpreter,
@@ -32,6 +33,7 @@ from app.services.document_interpreter import (
 
 pipeline = MedicalRagPipeline(settings)
 document_interpreter = MedicalDocumentInterpreter(settings)
+document_graph = MedicalDocumentGraph(document_interpreter, pipeline.search_research_evidence)
 
 
 @asynccontextmanager
@@ -133,7 +135,7 @@ async def interpret_medical_document(
     interpretation_focus: str = Form(default="", max_length=300),
     sensitive_data_consent: bool = Form(...),
 ) -> MedicalDocumentInterpretationResponse:
-    """接收单份医疗资料并执行提取、本地检索和受限模型解读。
+    """提取单份医疗资料并通过 LangGraph 执行本地检索和模型解读。
 
     Args:
         file: PDF、文本或报告截图，文件只在本次请求内存中处理。
@@ -165,28 +167,11 @@ async def interpret_medical_document(
             document_type,
             request_id,
         )
-        retrieval_query = " ".join(
-            item
-            for item in (
-                symptom_description.strip()[:150],
-                interpretation_focus.strip()[:100],
-                document.text[:100],
-                document.text[-150:],
-            )
-            if item
-        )[:500]
-        evidence_response = await run_in_threadpool(
-            pipeline.search_research_evidence,
-            ResearchSearchRequest(query=retrieval_query, top_k=4),
-        )
         return await run_in_threadpool(
-            document_interpreter.interpret,
-            document,
-            symptom_description,
-            interpretation_focus,
-            evidence_response,
-            request_id,
-            started_at,
+            document_graph.run,
+            {"document": document, "symptoms": symptom_description,
+             "focus": interpretation_focus, "request_id": request_id,
+             "started_at": started_at},
         )
     except DocumentInterpretationError as error:
         raise HTTPException(status_code=error.status_code, detail=error.message) from error

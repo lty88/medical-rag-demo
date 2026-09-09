@@ -9,6 +9,14 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from langchain_core.runnables import RunnableLambda
+from langgraph.graph import START, END, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+from langsmith import tracing_context
+
+from app.graph_state import ConsultationState
+from app.services.langchain_retrieval import MedicalIndexRetriever, restore_matches
+
 from app.config import Settings
 from app.models import (
     AnswerSection,
@@ -107,7 +115,10 @@ class MedicalRagPipeline:
             evidence_max_characters=settings.llm_evidence_max_characters,
             max_output_tokens=settings.llm_max_output_tokens,
             enable_thinking=settings.llm_enable_thinking,
+            structured_method=settings.llm_structured_method,
         )
+        self.consultation_graph = self._build_consultation_graph()
+        self.rerank_runnable = RunnableLambda(self._rerank_input, name="medical-reranker")
 
     def stats(self) -> KnowledgeStats:
         """返回当前知识库和可选模型的加载状态。
@@ -307,7 +318,7 @@ class MedicalRagPipeline:
             ),
         )
 
-    def search_research_evidence(
+    def _search_research_evidence(
         self,
         request: ResearchSearchRequest,
     ) -> ResearchSearchResponse:
@@ -323,40 +334,15 @@ class MedicalRagPipeline:
         request_id = uuid.uuid4().hex[:12]
         query = redact_privacy(request.query).text
         started_at = time.perf_counter()
-        if self.persistent_index is not None:
-            bm25_matches = self.persistent_index.search(query, self.settings.bm25_top_k)
-            if self.faiss_index is not None:
-                vector_rows = self.faiss_index.search(query, self.settings.vector_top_k)
-                documents_by_rowid = self.persistent_index.get_by_rowids(
-                    [rowid for rowid, _ in vector_rows]
-                )
-                vector_matches = [
-                    (documents_by_rowid[rowid], score)
-                    for rowid, score in vector_rows
-                    if rowid in documents_by_rowid
-                ]
-                vector_mode = self.faiss_index.mode
-            else:
-                vector_matches = []
-                vector_mode = "FAISS 未就绪"
-            keyword_mode = "SQLite FTS5/BM25"
-        else:
-            assert self.bm25 is not None
-            bm25_index_matches = self.bm25.search(query, self.settings.retrieval_top_k)
-            bm25_matches = [
-                (self.documents[index], score)
-                for index, score in bm25_index_matches
-            ]
-            vector_matches = []
-            keyword_mode = "内存 BM25"
-            vector_mode = "FAISS 未就绪"
-
+        bm25_matches, vector_matches, keyword_mode, vector_mode = self._retrieve(
+            query, [], request_id,
+        )
         mixed = reciprocal_rank_fusion(
             bm25_matches,
             vector_matches,
             self.settings.rrf_top_k,
         )
-        reranked = self.reranker.rerank(query, mixed)[: request.top_k]
+        reranked = self.rerank_runnable.invoke({"query": query, "candidates": mixed})[: request.top_k]
         self._log_retrieval_results(request_id, "研究检索", reranked)
         results = [
             ResearchEvidence(
@@ -387,18 +373,133 @@ class MedicalRagPipeline:
             duration_ms=round((time.perf_counter() - started_at) * 1000),
         )
 
-    def consult(self, request: ConsultationRequest) -> ConsultationResponse:
-        """执行完整咨询链路，并在危险或校验失败时安全中止。
+    def search_research_evidence(self, request: ResearchSearchRequest) -> ResearchSearchResponse:
+        """通过 LangChain Retriever 执行独立检索，并禁用医疗内容云端追踪。
 
         Args:
-            request: 已完成 API 字段校验的症状与人群信息。
+            request: 检索词与候选数量。
 
         Returns:
-            包含结构化答案、引用、追问和各阶段状态的响应。
+            兼容原接口的检索结果。
         """
+        with tracing_context(enabled=False):
+            return self._search_research_evidence(request)
 
+    def _retrieve(self, query: str, steps: list[PipelineStep], request_id: str) -> tuple:
+        """通过两个标准 Retriever 独立召回，保留低内存索引与前端轨迹。
+
+        Args:
+            query: 已脱敏查询。
+            steps: 当前节点的请求级轨迹。
+            request_id: 当前请求标识。
+
+        Returns:
+            BM25 候选、FAISS 候选及各自运行模式。
+        """
+        keyword = MedicalIndexRetriever(
+            channel="bm25",
+            top_k=self.settings.bm25_top_k if self.persistent_index else self.settings.retrieval_top_k,
+            sqlite_index=self.persistent_index, memory_index=self.bm25, documents=self.documents,
+        )
+        vector = MedicalIndexRetriever(
+            channel="faiss", top_k=self.settings.vector_top_k,
+            sqlite_index=self.persistent_index, vector_index=self.faiss_index,
+        )
+        bm25_matches = restore_matches(self._run_stage(
+            steps, "bm25", "关键词检索 / LangChain Retriever",
+            lambda items: f"独立召回 {len(items)} 条候选",
+            lambda: keyword.invoke(query),
+        ))
+        vector_matches = restore_matches(self._run_stage(
+            steps, "vector", "医疗 FAISS / LangChain Retriever",
+            lambda items: f"独立召回 {len(items)} 条候选" if self.faiss_index else (
+                f"FAISS 未就绪：{self.vector_load_error or '索引不存在'}"
+            ),
+            lambda: vector.invoke(query),
+            "passed" if self.faiss_index else "fallback",
+        ))
+        self._log_retrieval_results(request_id, "BM25", bm25_matches)
+        self._log_retrieval_results(request_id, "FAISS", vector_matches)
+        return (
+            bm25_matches, vector_matches,
+            "SQLite FTS5/BM25" if self.persistent_index else "内存 BM25",
+            self.faiss_index.mode if self.faiss_index else "FAISS 未就绪",
+        )
+
+    def _rerank_input(self, payload: dict[str, Any]) -> list[RankedDocument]:
+        """将医疗交叉编码器接入 LCEL Runnable，保持原有评分与权限策略。
+
+        Args:
+            payload: 包含 query 与 candidates 的排序输入。
+
+        Returns:
+            医疗精排后的候选列表。
+        """
+        return self.reranker.rerank(payload["query"], payload["candidates"])
+
+    def _build_consultation_graph(self) -> CompiledStateGraph:
+        """编译隐私、分诊、检索、生成和验证节点及急症条件分支。
+
+        Returns:
+            无持久化检查点的请求级 LangGraph 工作流。
+        """
+        graph = StateGraph(ConsultationState)
+        names = ["privacy", "triage", "emergency", "structure", "retrieve",
+                 "fusion", "rerank", "filter", "generate", "validate", "respond"]
+        for name in names:
+            graph.add_node(name, getattr(self, f"_node_{name}"))
+        graph.add_edge(START, "privacy")
+        graph.add_edge("privacy", "triage")
+        graph.add_conditional_edges("triage", self._route_triage,
+                                    {"emergency": "emergency", "structure": "structure"})
+        graph.add_edge("emergency", END)
+        sequence = ["structure", "retrieve", "fusion", "rerank", "filter",
+                    "generate", "validate", "respond"]
+        for current, following in zip(sequence, sequence[1:]):
+            graph.add_edge(current, following)
+        graph.add_edge("respond", END)
+        return graph.compile()
+
+    def _route_triage(self, state: ConsultationState) -> str:
+        """由显式危险信号决定是否直接终止后续模型与检索。
+
+        Args:
+            state: 含已命中危险信号的图状态。
+
+        Returns:
+            急症响应或症状结构化节点名。
+        """
+        return "emergency" if state["red_flags"] else "structure"
+
+    def consult(self, request: ConsultationRequest) -> ConsultationResponse:
+        """执行 LangGraph 问诊图并返回原有 API 响应结构。
+
+        Args:
+            request: 已通过 API 校验的症状与人群信息。
+
+        Returns:
+            完整咨询结果或急症阻断响应。
+        """
         request_id = uuid.uuid4().hex[:12]
-        steps: list[PipelineStep] = []
+        with tracing_context(enabled=False):
+            state = self.consultation_graph.invoke(
+                {"request": request, "request_id": request_id, "steps": []},
+                config={"run_name": "medical-consultation", "recursion_limit": 24},
+            )
+        return state["response"]
+
+    def _node_privacy(self, state: ConsultationState) -> dict[str, Any]:
+        """执行原有身份字段脱敏并记录本地输入日志。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        request = state["request"]
+        request_id = state["request_id"]
         raw_text = "\n".join(
             item for item in [request.symptoms, request.additional_info] if item
         )
@@ -414,6 +515,20 @@ class MedicalRagPipeline:
             lambda: redact_privacy(raw_text),
         )
         self._log_user_input(request_id, request, privacy)
+        return {"privacy": privacy, "steps": steps}
+
+    def _node_triage(self, state: ConsultationState) -> dict[str, Any]:
+        """执行原有急症规则，输出条件分支依据。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        request = state["request"]
+        privacy = state["privacy"]
         red_flags: list[str] = self._run_stage(
             steps,
             "triage",
@@ -421,43 +536,69 @@ class MedicalRagPipeline:
             lambda result: f"命中 {len(result)} 条危险信号" if result else "规则未命中",
             lambda: evaluate_red_flags(request, privacy.text),
         )
+        return {"red_flags": red_flags, "steps": steps}
 
-        if red_flags:
-            steps[-1].status = "blocked"
-            emergency_action = (
-                "请立即拨打 120 或前往最近急诊，并由身边的人陪同。"
-                if request.region.upper() == "CN"
-                else "请立即联系所在地急救服务或前往最近急诊，并由身边的人陪同。"
-            )
-            return ConsultationResponse(
-                request_id=request_id,
-                urgency="emergency",
-                blocked=True,
-                title="发现需立即处理的危险信号",
-                summary=f"{emergency_action}系统已停止检索和自动治疗建议。",
-                sections=[
-                    AnswerSection(
-                        title="现在该做什么",
-                        content="不要独自驾车；保持电话畅通，准备身份信息、用药清单和大致起病时间。",
-                    ),
-                    AnswerSection(
-                        title="命中的规则",
-                        content="；".join(red_flags),
-                    ),
-                ],
-                red_flags=red_flags,
-                follow_up_questions=[],
-                structured_symptoms={},
-                citations=[],
-                pipeline=steps,
-                validation_issues=[],
-                retrieval_mode="stopped-before-retrieval",
-                generation_mode="not-run",
-                generation_model=self.settings.llm_model,
-                privacy_notice="后续处理仅使用脱敏文本。",
-                disclaimer=DISCLAIMER,
-            )
+    def _node_emergency(self, state: ConsultationState) -> dict[str, Any]:
+        """组装急症终止响应，不进入检索或生成节点。
 
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        request = state["request"]
+        request_id = state["request_id"]
+        red_flags = state["red_flags"]
+        steps[-1].status = "blocked"
+        emergency_action = (
+            "请立即拨打 120 或前往最近急诊，并由身边的人陪同。"
+            if request.region.upper() == "CN"
+            else "请立即联系所在地急救服务或前往最近急诊，并由身边的人陪同。"
+        )
+        response = ConsultationResponse(
+            request_id=request_id,
+            urgency="emergency",
+            blocked=True,
+            title="发现需立即处理的危险信号",
+            summary=f"{emergency_action}系统已停止检索和自动治疗建议。",
+            sections=[
+                AnswerSection(
+                    title="现在该做什么",
+                    content="不要独自驾车；保持电话畅通，准备身份信息、用药清单和大致起病时间。",
+                ),
+                AnswerSection(
+                    title="命中的规则",
+                    content="；".join(red_flags),
+                ),
+            ],
+            red_flags=red_flags,
+            follow_up_questions=[],
+            structured_symptoms={},
+            citations=[],
+            pipeline=steps,
+            validation_issues=[],
+            retrieval_mode="stopped-before-retrieval",
+            generation_mode="not-run",
+            generation_model=self.settings.llm_model,
+            privacy_notice="后续处理仅使用脱敏文本。",
+            disclaimer=DISCLAIMER,
+        )
+        return {"response": response, "steps": steps}
+
+    def _node_structure(self, state: ConsultationState) -> dict[str, Any]:
+        """结构化症状并整合人体图谱中选择的上下文。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        request = state["request"]
+        privacy = state["privacy"]
         structured = self._run_stage(
             steps,
             "structure",
@@ -511,86 +652,38 @@ class MedicalRagPipeline:
         retrieval_query = "\n\n".join(
             item for item in [privacy.text, visual_context_text] if item
         )
-        if self.persistent_index is not None:
-            bm25_matches = self._run_stage(
-                steps,
-                "bm25",
-                "全量关键词检索 SQLite FTS5 / BM25",
-                lambda result: (
-                    f"从 {self.persistent_index.document_count:,} 条中召回 {len(result)} 条候选"
-                ),
-                lambda: self.persistent_index.search(
-                    retrieval_query,
-                    self.settings.bm25_top_k,
-                ),
-            )
-            if self.faiss_index is not None:
-                vector_row_matches = self._run_stage(
-                    steps,
-                    "vector",
-                    "全量中文医疗 Embedding / FAISS 独立召回",
-                    lambda result: (
-                        f"以 {self.faiss_index.mode} 从 "
-                        f"{self.faiss_index.document_count:,} 条中独立召回 {len(result)} 条"
-                    ),
-                    lambda: self.faiss_index.search(
-                        retrieval_query,
-                        self.settings.vector_top_k,
-                    ),
-                )
-                documents_by_rowid = self.persistent_index.get_by_rowids(
-                    [rowid for rowid, _ in vector_row_matches]
-                )
-                vector_matches = [
-                    (documents_by_rowid[rowid], score)
-                    for rowid, score in vector_row_matches
-                    if rowid in documents_by_rowid
-                ]
-                active_vector_mode = self.faiss_index.mode
-            else:
-                vector_matches = self._run_stage(
-                    steps,
-                    "vector",
-                    "全量中文医疗 Embedding / FAISS 独立召回",
-                    lambda result: (
-                        "FAISS 全量索引未就绪，本次仅保留 BM25；"
-                        f"原因：{self.vector_load_error or '索引文件不存在'}"
-                    ),
-                    lambda: [],
-                    "fallback",
-                )
-                active_vector_mode = "FAISS 全量索引未就绪"
-            retrieval_prefix = "SQLite FTS5/BM25 全量独立召回"
-        else:
-            assert self.bm25 is not None
-            bm25_index_matches = self._run_stage(
-                steps,
-                "bm25",
-                "关键词检索 BM25",
-                lambda result: f"从内存语料召回 {len(result)} 条候选",
-                lambda: self.bm25.search(
-                    retrieval_query,
-                    self.settings.retrieval_top_k,
-                ),
-            )
-            bm25_matches = [
-                (self.documents[index], score)
-                for index, score in bm25_index_matches
-            ]
-            vector_matches = self._run_stage(
-                steps,
-                "vector",
-                "全量中文医疗 Embedding / FAISS 独立召回",
-                lambda result: (
-                    "完整 SQLite/FAISS 索引未就绪，本次仅执行内存 BM25"
-                ),
-                lambda: [],
-                "fallback",
-            )
-            retrieval_prefix = "内存 BM25"
-            active_vector_mode = "FAISS 未就绪"
-        self._log_retrieval_results(request_id, "BM25", bm25_matches)
-        self._log_retrieval_results(request_id, "FAISS", vector_matches)
+        return {"structured": structured, "follow_up_questions": follow_up_questions, "retrieval_query": retrieval_query, "steps": steps}
+
+    def _node_retrieve(self, state: ConsultationState) -> dict[str, Any]:
+        """经标准 Retriever 独立执行关键词与向量召回。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        request_id = state["request_id"]
+        retrieval_query = state["retrieval_query"]
+        bm25_matches, vector_matches, retrieval_prefix, active_vector_mode = self._retrieve(
+            retrieval_query, steps, request_id,
+        )
+        return {"bm25_matches": bm25_matches, "vector_matches": vector_matches, "retrieval_prefix": retrieval_prefix, "active_vector_mode": active_vector_mode, "steps": steps}
+
+    def _node_fusion(self, state: ConsultationState) -> dict[str, Any]:
+        """按原有 RRF 规则融合与去重两个通道的候选。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        bm25_matches = state["bm25_matches"]
+        vector_matches = state["vector_matches"]
+        request_id = state["request_id"]
         mixed = self._run_stage(
             steps,
             "rrf",
@@ -603,17 +696,48 @@ class MedicalRagPipeline:
             ),
         )
         self._log_retrieval_results(request_id, "RRF", mixed)
+        return {"mixed": mixed, "steps": steps}
+
+    def _node_rerank(self, state: ConsultationState) -> dict[str, Any]:
+        """通过 LCEL Runnable 执行医疗交叉编码器精排。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        retrieval_query = state["retrieval_query"]
+        mixed = state["mixed"]
+        request_id = state["request_id"]
         reranked = self._run_stage(
             steps,
             "reranker",
             "医疗 Reranker 精排",
             lambda result: f"以 {self.reranker.mode} 完成 {len(result)} 条精排",
-            lambda: self.reranker.rerank(retrieval_query, mixed),
+            lambda: self.rerank_runnable.invoke({"query": retrieval_query, "candidates": mixed}),
             "passed" if self.reranker.neural_available else "fallback",
         )
         if not self.reranker.neural_available:
             steps[-1].status = "fallback"
         self._log_retrieval_results(request_id, "Reranker", reranked)
+        return {"reranked": reranked, "steps": steps}
+
+    def _node_filter(self, state: ConsultationState) -> dict[str, Any]:
+        """保留年龄、孕期、地区与指南过滤和生成权限。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        request = state["request"]
+        reranked = state["reranked"]
+        request_id = state["request_id"]
+        privacy = state["privacy"]
         filtered, filter_reasons = self._run_stage(
             steps,
             "filters",
@@ -624,6 +748,23 @@ class MedicalRagPipeline:
         final_candidates = filtered[: self.settings.final_top_k]
         self._log_retrieval_results(request_id, "最终证据", final_candidates)
         treatment_intent = is_treatment_intent(privacy.text)
+        return {"final_candidates": final_candidates, "filter_reasons": filter_reasons, "treatment_intent": treatment_intent, "steps": steps}
+
+    def _node_generate(self, state: ConsultationState) -> dict[str, Any]:
+        """把过滤后的最终证据发送到统一 LangChain 模型入口。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        retrieval_query = state["retrieval_query"]
+        final_candidates = state["final_candidates"]
+        follow_up_questions = state["follow_up_questions"]
+        treatment_intent = state["treatment_intent"]
+        request_id = state["request_id"]
         generated: GeneratedAnswer = self._run_stage(
             steps,
             "generation",
@@ -640,6 +781,21 @@ class MedicalRagPipeline:
         )
         if generated.mode != "configured-llm":
             steps[-1].status = "fallback"
+        return {"generated": generated, "steps": steps}
+
+    def _node_validate(self, state: ConsultationState) -> dict[str, Any]:
+        """执行原有引用、治疗、诊断与数字校验。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        generated = state["generated"]
+        final_candidates = state["final_candidates"]
+        treatment_intent = state["treatment_intent"]
         validation_issues: list[str] = self._run_stage(
             steps,
             "validation",
@@ -647,7 +803,28 @@ class MedicalRagPipeline:
             lambda result: f"发现 {len(result)} 个阻断问题" if result else "全部校验通过",
             lambda: validate_answer(generated, final_candidates, treatment_intent),
         )
+        return {"validation_issues": validation_issues, "steps": steps}
 
+    def _node_respond(self, state: ConsultationState) -> dict[str, Any]:
+        """根据安全校验组装兼容原前端的成功或拒绝响应。
+
+        Args:
+            state: 当前请求的图状态。
+
+        Returns:
+            本节点更新的字段和按顺序追加的处理轨迹。
+        """
+        steps = list(state["steps"])
+        final_candidates = state["final_candidates"]
+        validation_issues = state["validation_issues"]
+        generated = state["generated"]
+        filter_reasons = state["filter_reasons"]
+        structured = state["structured"]
+        request_id = state["request_id"]
+        follow_up_questions = state["follow_up_questions"]
+        retrieval_prefix = state["retrieval_prefix"]
+        active_vector_mode = state["active_vector_mode"]
+        privacy = state["privacy"]
         no_evidence = not final_candidates
         blocked = bool(validation_issues) or no_evidence
         if blocked:
@@ -672,7 +849,7 @@ class MedicalRagPipeline:
 
         if filter_reasons:
             structured["filter_notes"] = filter_reasons[:5]
-        return ConsultationResponse(
+        response = ConsultationResponse(
             request_id=request_id,
             urgency="insufficient" if blocked else "routine",
             blocked=blocked,
@@ -701,3 +878,4 @@ class MedicalRagPipeline:
             ),
             disclaimer=DISCLAIMER,
         )
+        return {"response": response, "steps": steps}

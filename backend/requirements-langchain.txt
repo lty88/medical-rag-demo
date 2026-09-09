@@ -1,0 +1,7 @@
+# LangChain v1 稳定接口；安装校验后固定具体版本，避免隐式升级。
+langchain==1.4.0
+langchain-core==1.6.2
+langchain-openai==1.6.0
+langgraph==1.2.11
+langsmith==0.12.2
+openai==3.8.0

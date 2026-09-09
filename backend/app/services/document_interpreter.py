@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import re
 import time
@@ -12,8 +11,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from app.services.langchain_chat import ModelCallError, complete_json, parse_complete_json
 
 from pypdf import PdfReader
 from pypdf.errors import PyPdfError
@@ -253,7 +251,7 @@ class MedicalDocumentInterpreter:
             evidence=self._build_evidence(evidence_response),
             retrieval_mode=evidence_response.retrieval_mode,
             generation_model=self.settings.llm_model or "",
-            privacy_notice="文件仅在本次请求的内存中处理；日志不记录文件内容。图片中的身份信息会发送给已配置的视觉模型，请上传前遮盖。",
+            privacy_notice="本服务不主动持久保存报告；上传框架可能使用临时文件。模型日志不记录正文。图片会发送给已配置的视觉模型，请上传前遮盖身份信息。",
             disclaimer="结果仅用于理解报告和准备就医问题，不是诊断结论，也不能替代出具报告的医生或影像科阅片。",
             duration_ms=round((time.perf_counter() - started_at) * 1000),
         )
@@ -367,7 +365,7 @@ class MedicalDocumentInterpreter:
         request_id: str,
         stage: str,
     ) -> dict[str, Any]:
-        """调用 OpenAI 兼容 Chat Completions 并解析 JSON 对象。
+        """通过共享 LangChain 入口调用兼容模型并解析完整 JSON 对象。
 
         Args:
             model: 服务端模型名称。
@@ -383,168 +381,40 @@ class MedicalDocumentInterpreter:
             DocumentInterpretationError: 网络、HTTP、超时或 JSON 结构异常时抛出。
         """
 
-        payload_data: dict[str, Any] = {
-            "model": model,
-            "temperature": 0,
-            "max_tokens": max(
-                self.settings.llm_max_output_tokens,
-                self.settings.medical_document_max_output_tokens,
-            ),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-        }
-        if self.settings.llm_enable_thinking is not None:
-            payload_data["enable_thinking"] = self.settings.llm_enable_thinking
-        LOGGER.info(
-            "[病历解读][LLM请求] request_id=%s stage=%s model=%s 包含图片=%s",
-            request_id,
-            stage,
-            model,
-            (
-                any(item.get("type") == "image_url" for item in user_content)
-                if isinstance(user_content, list)
-                else False
-            ),
-        )
-        request = Request(
-            self._chat_completions_url(),
-            data=json.dumps(payload_data, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.settings.llm_api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        started_at = time.perf_counter()
-        finish_reason = "unknown"
-        content_characters = 0
         try:
-            with urlopen(request, timeout=self.settings.llm_timeout_seconds) as response:  # noqa: S310
-                response_data = json.loads(response.read().decode("utf-8"))
-            choice = response_data["choices"][0]
-            finish_reason = str(choice.get("finish_reason") or "unknown")
-            content = self._message_content_text(choice["message"].get("content"))
-            content_characters = len(content)
-            if not content.strip():
-                raise ValueError("模型返回正文为空")
-            result = self._parse_json_object(content)
-        except HTTPError as error:
+            return complete_json(
+                base_url=self.settings.llm_base_url,
+                api_key=self.settings.llm_api_key,
+                model=model,
+                system_prompt=system_prompt,
+                user_content=user_content,
+                timeout=self.settings.llm_timeout_seconds,
+                max_tokens=max(
+                    self.settings.llm_max_output_tokens,
+                    self.settings.medical_document_max_output_tokens,
+                ),
+                enable_thinking=self.settings.llm_enable_thinking,
+                request_id=request_id,
+                stage=stage,
+                structured_method=self.settings.llm_structured_method,
+            )
+        except ModelCallError as error:
             LOGGER.warning(
-                "[病历解读][LLM失败] request_id=%s stage=%s model=%s type=http status=%s",
-                request_id,
-                stage,
-                model,
-                error.code,
+                "[病历解读][LLM失败] request_id=%s stage=%s error=%s",
+                request_id, stage, error,
             )
-            raise DocumentInterpretationError(
-                502,
-                f"模型服务返回 HTTP {error.code}，请检查模型权限和接口地址。",
-            ) from error
-        except (URLError, TimeoutError, OSError) as error:
-            LOGGER.warning(
-                "[病历解读][LLM失败] request_id=%s stage=%s model=%s type=network error=%s",
-                request_id,
-                stage,
-                model,
-                type(error).__name__,
-            )
-            raise DocumentInterpretationError(504, "模型服务连接失败或请求超时。") from error
-        except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            LOGGER.warning(
-                "[病历解读][LLM失败] request_id=%s stage=%s model=%s type=response-format "
-                "finish_reason=%s content_characters=%s error=%s",
-                request_id,
-                stage,
-                model,
-                finish_reason,
-                content_characters,
-                str(error)[:160],
-            )
-            detail = (
-                "模型输出达到长度上限，结构化结果不完整；请重试或提高 "
-                "MEDICAL_DOCUMENT_MAX_OUTPUT_TOKENS。"
-                if finish_reason == "length"
-                else "模型返回内容不是有效的结构化 JSON，请重试。"
-            )
-            raise DocumentInterpretationError(502, detail) from error
-        LOGGER.info(
-            "[病历解读][LLM响应] request_id=%s stage=%s model=%s duration_ms=%s",
-            request_id,
-            stage,
-            model,
-            round((time.perf_counter() - started_at) * 1000),
-        )
-        return result
-
-    def _chat_completions_url(self) -> str:
-        """规范化 OpenAI 兼容接口地址。
-
-        Returns:
-            可直接请求的 Chat Completions URL。
-
-        Raises:
-            DocumentInterpretationError: Base URL 未配置时抛出。
-        """
-
-        if not self.settings.llm_base_url:
-            raise DocumentInterpretationError(503, "LLM_BASE_URL 未配置。")
-        normalized = self.settings.llm_base_url.rstrip("/")
-        return normalized if normalized.endswith("/chat/completions") else f"{normalized}/chat/completions"
+            raise DocumentInterpretationError(error.status_code, str(error)) from error
 
     def _parse_json_object(self, content: str) -> dict[str, Any]:
-        """从纯 JSON、代码块或带少量说明文字的响应中提取 JSON 对象。
+        """通过共享完整性校验解析模型 JSON，拒绝截断的内层对象。
 
         Args:
-            content: 模型返回的消息正文。
+            content: 模型返回文本。
 
         Returns:
-            JSON 对象。
-
-        Raises:
-            ValueError: 返回内容不是 JSON 对象时抛出。
+            完整的顶层 JSON 对象。
         """
-
-        normalized = content.strip().lstrip("\ufeff")
-        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", normalized, re.S | re.I)
-        if fenced:
-            normalized = fenced.group(1).strip()
-        decoder = json.JSONDecoder()
-        for match in re.finditer(r"\{", normalized):
-            try:
-                result, _ = decoder.raw_decode(normalized[match.start():])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(result, dict):
-                return result
-        raise ValueError("模型响应中没有完整的 JSON 对象")
-
-    def _message_content_text(self, value: Any) -> str:
-        """兼容不同 OpenAI 服务返回的字符串或内容分片格式。
-
-        Args:
-            value: `message.content` 原始值。
-
-        Returns:
-            合并后的模型正文；没有可用正文时返回空字符串。
-        """
-
-        if isinstance(value, str):
-            return value
-        if not isinstance(value, list):
-            return ""
-        parts: list[str] = []
-        for item in value:
-            if isinstance(item, str):
-                parts.append(item)
-                continue
-            if not isinstance(item, dict):
-                continue
-            text_value = item.get("text") or item.get("content")
-            if isinstance(text_value, str):
-                parts.append(text_value)
-        return "".join(parts)
+        return parse_complete_json(content)
 
     def _format_evidence(self, response: ResearchSearchResponse) -> str:
         """把本地混合检索结果格式化为带固定编号的上下文。

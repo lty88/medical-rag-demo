@@ -94,6 +94,7 @@ class Settings:
         os.getenv("LLM_EVIDENCE_MAX_CHARACTERS", "2500")
     )
     llm_max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1200"))
+    llm_structured_method: str = os.getenv("LLM_STRUCTURED_METHOD", "prompt")
     medical_document_max_output_tokens: int = int(
         os.getenv("MEDICAL_DOCUMENT_MAX_OUTPUT_TOKENS", "2400")
     )
