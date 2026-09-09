@@ -10,13 +10,14 @@ import type {
   AnatomyStructureSelection,
   AnatomySystemId,
 } from '../anatomy/types'
-import type { AtlasBodyRegion } from '../types'
+import type { AtlasBodyRegion, AtlasSystem } from '../types'
 
 const props = defineProps<{
   modelId: AnatomyModelId
   activeSystemId: string
   focusVersion: number
   regions: AtlasBodyRegion[]
+  systems: AtlasSystem[]
   selectedStructureNames: string[]
   autoRotate: boolean
 }>()
@@ -58,10 +59,11 @@ function handleStructureSelect(selection: AnatomyStructureSelection) {
 /**
  * 把 GLB 技术节点名转换为普通用户可读的中文部位名称。
  * @param rawName 三维模型原始网格名称
+ * @param systemId 网格实际所属系统，用于查找对应的中文器官目录
  * @returns 匹配后的中文身体区域名称
  */
-function resolveStructureLabel(rawName: string) {
-  return resolveRegionLabel(rawName, props.regions)
+function resolveStructureLabel(rawName: string, systemId: AnatomySystemId) {
+  return resolveRegionLabel(rawName, props.regions, props.systems, systemId)
 }
 
 /**

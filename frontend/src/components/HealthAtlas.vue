@@ -1,6 +1,6 @@
 <script setup lang="tsx">
 import { computed, nextTick, ref, watch } from 'vue'
-import { findAtlasOrgan, findBodyRegion } from '../anatomy/regions'
+import { findAtlasOrgan, findBodyRegion, resolveStructureLabel } from '../anatomy/regions'
 import type { AnatomyStructureSelection, BodyMapExposed } from '../anatomy/types'
 import AtlasNavigationPanel from './AtlasNavigationPanel.vue'
 import AtlasRegionInspector from './AtlasRegionInspector.vue'
@@ -48,7 +48,9 @@ const visibleSystems = computed(
   })) ?? [],
 )
 const activeOrgan = computed(
-  () => activeSystem.value?.organs.find((organ) => organ.id === activeOrganId.value)
+  () => (activeComplaintId.value.startsWith('structure:') && !activeOrganId.value)
+    ? null
+    : activeSystem.value?.organs.find((organ) => organ.id === activeOrganId.value)
     ?? activeSystem.value?.organs[0]
     ?? null,
 )
@@ -145,7 +147,7 @@ function addComplaint(
 }
 
 /**
- * 将点击的三维模型网格解析为中文身体区域，并切换其多选状态。
+ * 按所属系统将网格解析为中文部位并切换多选，原始名称只用于模型定位。
  * @param selection 三维场景返回的系统和原始网格名称
  */
 function selectStructure(selection: AnatomyStructureSelection) {
@@ -165,17 +167,19 @@ function selectStructure(selection: AnatomyStructureSelection) {
   }
   const system = props.atlas.systems.find((item) => item.id === selection.systemId)
   if (!system) return
-  const organ = findAtlasOrgan(selection.rawName, system.organs) ?? system.organs[0]
-  if (!organ) return
+  const organ = findAtlasOrgan(selection.rawName, system.organs)
   activeSystemId.value = system.id
-  activeOrganId.value = organ.id
+  activeOrganId.value = organ?.id ?? ''
   const complaintId = `structure:${system.id}:${selection.rawName}`
   activeComplaintId.value = complaintId
   if (selectedComplaints.value.some((item) => item.region_id === complaintId)) {
     removeComplaint(complaintId)
     return
   }
-  addComplaint(complaintId, selection.label, selection.rawName, organ.department_ids)
+  const label = resolveStructureLabel(
+    selection.rawName, props.atlas.body_regions, props.atlas.systems, system.id,
+  )
+  addComplaint(complaintId, label, selection.rawName, organ?.department_ids ?? [])
 }
 
 /**
@@ -261,7 +265,7 @@ function removeComplaint(regionId: string) {
 }
 
 /**
- * 从已选清单重新打开某个身体部位的说明与症状选项。
+ * 从已选清单重新打开部位说明；未匹配的模型结构不借用其他器官的说明。
  * @param regionId 要查看的身体区域标识
  */
 function focusComplaint(regionId: string) {
@@ -277,7 +281,7 @@ function focusComplaint(regionId: string) {
     const organ = complaint?.structure_label
       ? findAtlasOrgan(complaint.structure_label, system?.organs ?? [])
       : null
-    activeOrganId.value = organ?.id ?? system?.organs[0]?.id ?? ''
+    activeOrganId.value = organ?.id ?? ''
     return
   }
   if (regionId.startsWith('organ:')) {

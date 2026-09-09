@@ -251,13 +251,13 @@ function normalizeAnatomyScale(anatomyRoot: THREE.Group) {
  * 把一个 GLB 解剖文件载入场景并转换为可交互医学材质。
  * @param loader 已配置 Draco 解码器的 GLTFLoader
  * @param config 当前解剖层配置
- * @param resolveStructureLabel 将模型节点名称转换为中文部位名称的函数
+ * @param resolveStructureLabel 按实际所属系统将模型节点名称转换为中文部位名称的函数
  * @returns 已载入的模型根节点、共享材质及拾取网格
  */
 async function loadAnatomyLayer(
   loader: GLTFLoader,
   config: AnatomyLayerConfig,
-  resolveStructureLabel: (rawName: string) => string,
+  resolveStructureLabel: (rawName: string, systemId: AnatomySystemId) => string,
 ): Promise<LoadedAnatomyLayer> {
   const gltf = await loader.loadAsync(config.url)
   const material = createLayerMaterial(config)
@@ -266,7 +266,7 @@ async function loadAnatomyLayer(
   root.name = `anatomy-${config.id}`
 
   /**
-   * 为 GLB 内的每个真实解剖网格绑定材质、系统标识和可读名称。
+   * 为真实解剖网格绑定材质、原始定位标识及所属系统对应的中文名称。
    * @param object 当前遍历的模型节点
    */
   function prepareMesh(object: THREE.Object3D) {
@@ -280,7 +280,7 @@ async function loadAnatomyLayer(
     mesh.frustumCulled = true
     mesh.userData.systemId = config.id
     mesh.userData.rawName = mesh.name
-    mesh.userData.organLabel = resolveStructureLabel(mesh.name)
+    mesh.userData.organLabel = resolveStructureLabel(mesh.name, config.id)
     if (config.interactive) {
       meshes.push(mesh)
     }

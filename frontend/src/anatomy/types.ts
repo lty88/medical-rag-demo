@@ -34,7 +34,7 @@ export interface AnatomySceneOptions {
   onHover: (info: AnatomyHoverInfo | null) => void
   onProgress: (progress: number) => void
   onLayerStatus: (loadedSystemIds: AnatomySystemId[], failedSystemIds: AnatomySystemId[]) => void
-  resolveStructureLabel: (rawName: string) => string
+  resolveStructureLabel: (rawName: string, systemId: AnatomySystemId) => string
 }
 
 export interface AnatomySceneController {

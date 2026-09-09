@@ -131,6 +131,7 @@ defineExpose<BodyMapExposed>({ focusStructure, focusAliases })
       :active-system-id="activeSystemId"
       :focus-version="focusVersion"
       :regions="regions"
+      :systems="systems"
       :selected-structure-names="selectedStructureNames"
       :auto-rotate="isAutoRotating && !isPointerInside"
       @select="selectSystem"
