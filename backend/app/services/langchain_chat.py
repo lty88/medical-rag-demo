@@ -8,13 +8,86 @@ import re
 from typing import Any
 
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langsmith import tracing_context
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 
 LOGGER = logging.getLogger("uvicorn.error.medical_rag.langchain")
+
+
+def create_chat_model(
+    *, base_url: str | None, api_key: str | None, model: str | None,
+    timeout: int, max_tokens: int, enable_thinking: bool | None,
+) -> BaseChatModel:
+    """创建共用的 LangChain 兼容模型，不启用工具或远端会话存储。
+
+    Args:
+        base_url: 模型根地址，兼容历史完整接口地址。
+        api_key: 仅由服务端读取的密钥。
+        model: 模型标识。
+        timeout: 请求超时秒数。
+        max_tokens: 输出 Token 上限。
+        enable_thinking: 服务商思考开关。
+
+    Returns:
+        使用 Chat Completions 协议的 LangChain 模型。
+    """
+    if not all((base_url, api_key, model)):
+        raise ModelCallError("LLM_BASE_URL、LLM_API_KEY 或 LLM_MODEL 未配置", 503)
+    return init_chat_model(
+        model=model, model_provider="openai",
+        base_url=(base_url or "").rstrip("/").removesuffix("/chat/completions"),
+        api_key=api_key, temperature=0, timeout=timeout, max_tokens=max_tokens,
+        max_retries=0, use_responses_api=False,
+        extra_body={"enable_thinking": enable_thinking} if enable_thinking is not None else {},
+    )
+
+
+def complete_text(messages: list[BaseMessage], **options: Any) -> AIMessage:
+    """调用纯文本模型并检查空响应、拒绝和截断；失败不会返回可写入记忆的消息。
+
+    Args:
+        messages: 系统提示、有限历史和当前用户消息。
+        options: create_chat_model 接受的服务端模型配置。
+
+    Returns:
+        仅含可见正文的助手消息，不保留推理、供应商元数据或工具调用。
+    """
+    try:
+        with tracing_context(enabled=False):
+            output = create_chat_model(**options).invoke(messages)
+        finish = output.response_metadata.get("finish_reason")
+        if finish in {"length", "max_tokens"}:
+            raise ModelCallError("回答达到输出长度上限，请缩小问题范围后重试")
+        if finish == "content_filter" or output.additional_kwargs.get("refusal"):
+            raise ModelCallError("模型拒绝处理本次内容")
+        if getattr(output, "tool_calls", None):
+            raise ModelCallError("自由对话不支持模型工具调用")
+        content = output.content
+        if isinstance(content, list):
+            content = "".join(
+                item if isinstance(item, str) else str(item.get("text", ""))
+                for item in content if isinstance(item, str)
+                or (isinstance(item, dict) and item.get("type") == "text")
+            )
+        if not isinstance(content, str) or not content.strip():
+            raise ModelCallError("模型未返回有效文字，请重试")
+        if len(content) > 16000:
+            raise ModelCallError("回答超过本会话长度限制，请缩小问题范围")
+        return AIMessage(content=content.strip())
+    except APITimeoutError as error:
+        raise ModelCallError("模型请求超时", 504) from error
+    except APIConnectionError as error:
+        raise ModelCallError("模型网络连接失败", 504) from error
+    except APIStatusError as error:
+        raise ModelCallError(f"模型服务返回 HTTP {error.status_code}，请检查配置与权限") from error
+    except ModelCallError:
+        raise
+    except Exception as error:
+        raise ModelCallError("模型调用失败，请检查服务端模型配置") from error
 
 
 class ModelCallError(ValueError):
@@ -92,19 +165,9 @@ def complete_json(
         raise ModelCallError("LLM_BASE_URL、LLM_API_KEY 或 LLM_MODEL 未配置", 503)
     if structured_method not in {"prompt", "json_mode"}:
         raise ModelCallError("LLM_STRUCTURED_METHOD 必须为 prompt 或 json_mode", 503)
-    url = (base_url or "").rstrip("/").removesuffix("/chat/completions")
-    extra_body = {"enable_thinking": enable_thinking} if enable_thinking is not None else {}
-    chat = init_chat_model(
-        model=model,
-        model_provider="openai",
-        base_url=url,
-        api_key=api_key,
-        temperature=0,
-        timeout=timeout,
-        max_tokens=max_tokens,
-        max_retries=0,
-        use_responses_api=False,
-        extra_body=extra_body,
+    chat = create_chat_model(
+        base_url=base_url, api_key=api_key, model=model,
+        timeout=timeout, max_tokens=max_tokens, enable_thinking=enable_thinking,
     )
     prompt = ChatPromptTemplate.from_messages([MessagesPlaceholder("messages")])
     runner = (

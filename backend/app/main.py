@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.chat_routes import cleanup_chat_sessions, free_chat, router as chat_router
 from app.models import (
     BodyAtlasResponse,
     ConsultationRequest,
@@ -38,7 +40,7 @@ document_graph = MedicalDocumentGraph(document_interpreter, pipeline.search_rese
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """在应用生命周期内预热并最终关闭隔离模型与数据库连接。
+    """预热模型、定期清理对话记忆，并在退出时关闭资源与内存会话。
 
     Args:
         _: 当前 FastAPI 应用实例，本流程不需要直接访问。
@@ -48,9 +50,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """
 
     pipeline.warmup_models()
+    chat_cleanup_task = asyncio.create_task(cleanup_chat_sessions())
     try:
         yield
     finally:
+        chat_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await chat_cleanup_task
+        free_chat.close()
         pipeline.close()
 
 
@@ -67,6 +74,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+app.include_router(chat_router)
 
 
 @app.get("/api/health")

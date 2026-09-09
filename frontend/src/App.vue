@@ -4,6 +4,7 @@ import { fetchBodyAtlas, fetchKnowledgeStats, submitConsultation } from './api/c
 import AppSidebar from './components/AppSidebar.vue'
 import ConsultWorkspace from './components/ConsultWorkspace.vue'
 import EvidenceSearch from './components/EvidenceSearch.vue'
+import FreeChatWorkspace from './components/FreeChatWorkspace.vue'
 import HealthAtlas from './components/HealthAtlas.vue'
 import KnowledgeWorkspace from './components/KnowledgeWorkspace.vue'
 import MedicalRecordWorkspace from './components/MedicalRecordWorkspace.vue'
@@ -26,6 +27,7 @@ const menuItems: WorkspaceMenuItem[] = [
   { key: 'research', label: '证据检索', description: '独立混合召回', index: '04' },
   { key: 'knowledge', label: '知识资产', description: '语料与权限', index: '05' },
   { key: 'monitor', label: '运行监测', description: '模型与索引', index: '06' },
+  { key: 'chat', label: '自由对话', description: 'LLM · 短期记忆', index: '07' },
 ]
 
 const activeWorkspace = ref<WorkspaceKey>('consult')
@@ -218,7 +220,8 @@ onMounted(loadWorkspaceData)
           v-else-if="activeWorkspace === 'knowledge'"
           :stats="stats"
         />
-        <SystemMonitor v-else :stats="stats" @refresh="loadWorkspaceData" />
+        <SystemMonitor v-else-if="activeWorkspace === 'monitor'" :stats="stats" @refresh="loadWorkspaceData" />
+        <FreeChatWorkspace v-show="activeWorkspace === 'chat'" />
       </div>
     </section>
   </main>

@@ -78,6 +78,51 @@ cd backend
 
 官方接口依据：[LangChain v1 迁移指南](https://docs.langchain.com/oss/python/migrate/langchain-v1)、[LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、[ChatOpenAI 集成](https://docs.langchain.com/oss/python/integrations/chat/openai)。
 
+## 自由对话：直接 LLM + 短期记忆
+
+新增独立菜单 **07 / 自由对话**。该入口与智能问诊、报告解读分开，不调用 BM25、FAISS、Reranker，也不自动读取其他页面的资料或生成检索引用。
+
+技术路径：前端本轮文本 → 独立会话接口 → LangGraph `StateGraph` → LangChain `ChatPromptTemplate` / `MessagesPlaceholder` → `init_chat_model` / `ChatOpenAI` → 纯文本回答 → `InMemorySaver` 内存检查点。
+
+这里没有检索工具或 Agent 工具循环，也不使用已被本项目安装版本标记为弃用的 `ConversationBufferMemory` / `RunnableWithMessageHistory`。每个随机会话对应独立的 `thread_id`，短期记忆通过 LangGraph 检查点读写。接口依据：[LangGraph 短期记忆与检查点](https://docs.langchain.com/oss/python/langgraph/add-memory)。
+
+### 使用方式与记忆边界
+
+- 复用 `backend/.env` 中现有 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_OUTPUT_TOKENS`、`LLM_ENABLE_THINKING`，不需要新密钥、额外依赖或重建向量索引。此入口返回文本，不受 `LLM_STRUCTURED_METHOD` JSON 模式控制。
+- 点击“自由对话”，输入第一条消息时才创建会话。可先发送“我正在学习 Python”，再问“我刚才在学什么？”来检查连续上下文。
+- 后端只保留最近 **12 轮完整问答**，同时限制历史正文总量为 **24,000 字符**。当前输入最多 4,000 字符；超限从最早问答对开始移除，不会留下孤立的助手消息。字符上限不是模型精确 Token 上限，长回答仍受供应商上下文和输出限制。
+- 闲置 **30 分钟**过期，过期检查在访问时执行，后台每分钟清理内存。上限 **128 个会话**，满额拒绝新建，不挤掉其他人的历史。相关常量位于 `backend/app/services/free_chat.py`。
+- 页面切换保留当前对话；刷新或关闭页面后没有历史恢复功能。浏览器不使用 localStorage/sessionStorage 保存正文或凭据；服务端重启后记忆丢失。刷新前的遗留会话会按闲置期限清理。
+- 页面显示最近 40 轮记录，**可见旧消息不代表仍在模型上下文中**。页头展示当前模型和实际保留的记忆轮数。
+- “清空对话与记忆”需要确认，会清除服务端检查点及最近一次重试缓存，再清空界面。会话已过期时，界面明确提示开始新对话，不静默假装模型仍记得旧内容。
+- 同一会话有进行中的请求时，拒绝并发发送和清空。失败不提交输入、回答或裁剪后的历史；重试当前最后一次请求使用相同 `request_id`，避免重复追加成功的回答。
+- 每轮在请求局部 `InMemorySaver` 中执行图，完整成功后才替换会话检查点。旧检查点版本随之释放，防止裁剪了消息却仍无限保留早期完整快照。
+
+### 新增接口
+
+| 接口 | 请求正文 | 作用 |
+|---|---|---|
+| `POST /api/chat/sessions` | `{}` | 创建不可预测的随机会话凭据，返回模型与记忆策略 |
+| `POST /api/chat/messages` | `session_id`、`message`、UUID 格式的 `request_id` | 发送当前一条消息，历史只从服务端检查点读取 |
+| `POST /api/chat/clear` | `session_id` | 真正清空该会话的服务端记忆与重试缓存 |
+
+模型未配置返回 503；未知或过期会话返回 410；同会话忙碌返回 409；上游超时返回 504。模型失败不会以空回答或证据模板伪装成功。
+
+### 安全与部署说明
+
+自由对话明确显示 **RAG 未启用**，不执行智能问诊的急症规则或引用校验；系统提示只提供基本行为约束，并不是医疗安全校验保障。涉及健康的问题不能据此自行诊断、开药或改剂量。
+
+当前会话输入和有限历史会发给你配置的模型服务商，供应商的数据留存遵循其自身政策。本地不记录聊天正文或会话凭据，也不自动上传到 LangSmith；界面通过 Vue 文本插值展示回答，不把模型 HTML 作为代码执行。
+
+这是**单进程短期记忆**：多 worker / 多实例不能共享会话，须先接入共享存储和账号鉴权再扩展。随机会话凭据是访问能力凭据，不等于登录认证，请勿分享；公开部署前仍需在网关或应用层加身份认证、速率限制和用户配额。不要直接将匿名付费模型接口暴露到公网。
+
+局部离线验证（不启动服务，不请求真实模型）：
+
+```bash
+cd backend
+../.venv-full/bin/python -m unittest tests.test_free_chat tests.test_langchain_migration -v
+```
+
 项目当前已经完成以下全量索引：
 
 | 产物 | 当前规模 | 用途 |

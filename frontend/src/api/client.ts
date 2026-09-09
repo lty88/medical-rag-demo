@@ -10,7 +10,64 @@ import type {
   ResearchSearchResponse,
 } from '../types'
 
+import type { ChatMessageRequest, ChatMessageResponse, ChatSession } from '../typings/api/chat'
+
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+
+/** 保存自由对话接口状态码，供界面区分会话过期与可重试失败。 */
+export class ChatApiError extends Error {
+  status: number
+
+  /**
+   * 创建不会丢失会话过期状态的接口错误。
+   * @param message 可读错误信息
+   * @param status HTTP 状态码
+   */
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
+/**
+ * 请求独立对话接口，不上传整个历史或客户端系统提示。
+ * @param path 自由对话 API 路径
+ * @param payload 本轮请求正文
+ * @returns 后端会话或回答数据
+ */
+async function requestChat<T>(path: string, payload: object): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new ChatApiError(await readError(response), response.status)
+  return await response.json() as T
+}
+
+/**
+ * 创建随机独立会话，短期记忆仅保存于后端进程。
+ * @returns 会话凭据及模型、过期时间和记忆容量
+ */
+export function createChatSession(): Promise<ChatSession> {
+  return requestChat('/api/chat/sessions', {})
+}
+
+/**
+ * 将当前文本交给 LangChain 直接调用 LLM，并在成功后保存短期记忆。
+ * @param payload 当前会话、输入及用于重试去重的请求标识
+ * @returns 助手回答及保留的记忆轮数
+ */
+export function sendChatMessage(payload: ChatMessageRequest): Promise<ChatMessageResponse> {
+  return requestChat('/api/chat/messages', payload)
+}
+
+/**
+ * 清除真实服务端会话记忆及重试缓存。
+ * @param sessionId 当前持有的随机会话凭据
+ * @returns 清空后的会话说明
+ */
+export function clearChatSession(sessionId: string): Promise<ChatSession> {
+  return requestChat('/api/chat/clear', { session_id: sessionId })
+}
 
 /**
  * 拼接本地代理或生产后端的 API 请求地址。

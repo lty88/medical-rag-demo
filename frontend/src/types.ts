@@ -81,7 +81,7 @@ export interface ScenarioPreset {
   value: Partial<ConsultationFormState>
 }
 
-export type WorkspaceKey = 'consult' | 'atlas' | 'records' | 'research' | 'knowledge' | 'monitor'
+export type WorkspaceKey = 'consult' | 'atlas' | 'records' | 'research' | 'knowledge' | 'monitor' | 'chat'
 
 export interface WorkspaceMenuItem {
   key: WorkspaceKey

@@ -31,6 +31,7 @@ let startedAt = 0
 let reduceMotion = false
 
 const palettes: Record<WorkspaceKey, CanvasPalette> = {
+  chat: { primary: '117, 225, 209', secondary: '125, 211, 252', glow: '94, 234, 212' },
   consult: { primary: '117, 225, 209', secondary: '125, 211, 252', glow: '94, 234, 212' },
   atlas: { primary: '94, 234, 212', secondary: '251, 113, 133', glow: '125, 211, 252' },
   records: { primary: '103, 232, 249', secondary: '94, 234, 212', glow: '251, 191, 36' },
@@ -220,7 +221,7 @@ function drawDnaHelix(time: number, palette: CanvasPalette) {
 }
 
 /**
- * 绘制科研数据标记和随工作区变化的数值标签。
+ * 绘制随工作区变化的科研标记，自由对话明确标注直接模型与短期记忆而非检索状态。
  * @param time 当前动画经过的秒数
  * @param palette 当前工作区配色
  */
@@ -228,6 +229,7 @@ function drawDataReadouts(time: number, palette: CanvasPalette) {
   if (!context || width < 760) return
   const currentContext = context
   const labels: Record<WorkspaceKey, string[]> = {
+    chat: ['DIRECT  LLM', 'SESSION  MEMORY', 'NO  RETRIEVAL'],
     consult: ['TRIAGE  ACTIVE', 'RAG  HYBRID', 'CITATION  VERIFY'],
     atlas: ['SYSTEM  MAP', 'ORGAN  LAYER', 'ANATOMY  EDU'],
     records: ['DOCUMENT  PARSE', 'VISION  TRANSCRIBE', 'CLINICAL  EXPLAIN'],
